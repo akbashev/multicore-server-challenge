@@ -28,8 +28,11 @@ final class Scheduler: Sendable {
 
     private let state: Mutex<State>
 
-    init(readWorkers: Int, bcryptLanes: Int, seedBcryptUs: Int) {
-        state = Mutex(State(readWorkers: readWorkers, bcryptLanes: bcryptLanes, seedBcryptUs: seedBcryptUs))
+    /// `fullBcryptSets`: wait up to two bcrypt runs, with no cap, for a full lane set once workers overlap, instead of at
+    /// most 35-45 ms.
+    init(readWorkers: Int, bcryptLanes: Int, seedBcryptUs: Int, fullBcryptSets: Bool = false) {
+        state = Mutex(State(readWorkers: readWorkers, bcryptLanes: bcryptLanes, seedBcryptUs: seedBcryptUs,
+                            fullBcryptSets: fullBcryptSets))
     }
 
     /// Queues `s`'s work and leaves it empty, its arrays' memory kept for the caller's next pass.
@@ -98,6 +101,7 @@ extension Scheduler {
     private struct State: ~Copyable {
         let readWorkers: Int
         let bcryptLanes: Int
+        let fullBcryptSets: Bool
         let maxBatch: Int
 
         var reads: [ReadQueue]
@@ -123,9 +127,10 @@ extension Scheduler {
         /// Requests whose connection closed while they were queued.
         var cancelled = Set<ReplyAddr>()
 
-        init(readWorkers: Int, bcryptLanes: Int, seedBcryptUs: Int) {
+        init(readWorkers: Int, bcryptLanes: Int, seedBcryptUs: Int, fullBcryptSets: Bool) {
             self.readWorkers = readWorkers
             self.bcryptLanes = bcryptLanes
+            self.fullBcryptSets = fullBcryptSets
             let rw = max(readWorkers, 2)
             maxBatch = Catalog.reads().count * rw * 2 * rw * 2
             reads = Array(repeating: ReadQueue(ewmaUs: max(seedBcryptUs >> 7, 600)), count: 3)
@@ -275,7 +280,8 @@ extension Scheduler {
         // ---------- bcrypt ----------
 
         /// One worker gathers at a time, for a full lane set: briefly when logins come one by one, otherwise for 1.5
-        /// bcrypt runs (2 to 35 ms) with no other worker busy, or 2 (10 to 45 ms) with one.
+        /// bcrypt runs (2 to 35 ms) with no other worker busy, or 2 (10 to 45 ms) with one. With `fullBcryptSets`,
+        /// briefly while no worker is busy and logins come one by one, otherwise for two bcrypt runs.
         mutating func nextCrypto(_ loop: EventLoop, finished: CryptoBatchDone?, _ wakes: inout Wakes) -> TakeStep<CryptoTask> {
             let now = Sys.monotonicNanos()
             if let f = finished {
@@ -300,7 +306,9 @@ extension Scheduler {
                 let tauUs = max(ewmaBcryptUs, 10_000)
                 let overlap = busyCryptoWorkers > 0 || crypto.count > 1
                     || (lastCryptoDone > 0 && now &- min(lastCryptoDone, now) < 120_000_000)
-                let ageUs = if !overlap && ewmaCryptoLen <= 1 {
+                let ageUs = if fullBcryptSets {
+                    busyCryptoWorkers == 0 && ewmaCryptoLen <= 1 ? max(ewmaBcryptUs / (lanes * 2), 1) : max(ewmaBcryptUs * 2, 1)
+                } else if !overlap && ewmaCryptoLen <= 1 {
                     max(tauUs / (lanes * 2), 1)
                 } else if busyCryptoWorkers == 0 {
                     min(max(tauUs * 3 / 2, 2_000), 35_000)
