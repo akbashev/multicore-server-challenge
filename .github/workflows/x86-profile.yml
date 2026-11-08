@@ -1,5 +1,5 @@
-# Not for upstream: on an x86 runner, CPU per login and per request for swift-epoll-akbashev as in PR #227
-# (swift-epoll-akbashev-next) and with the changes in progress (swift-epoll-akbashev-perf), against
+# Not for upstream: on an x86 runner, CPU per login and per request for swift-epoll-akbashev with the changes in
+# progress (swift-epoll-akbashev-perf; -final adds SHA-256 on the SHA extensions and packed flag pairs), against
 # rust-epoll-theCatWisel at #201 built with its symbols (strip off, nothing else changed), under the same loads, with
 # Postgres 18 set up as on the box and the full seed; each thread kind's top symbols too.
 name: x86 profile
@@ -50,8 +50,8 @@ jobs:
         run: |
           inst() { sudo bash "submissions/$1/install.sh" > "/tmp/install-$1.log" 2>&1 || { tail -30 "/tmp/install-$1.log"; exit 1; }; }
           inst swift-epoll-akbashev
-          bash submissions/swift-epoll-akbashev-next/build.sh 2>&1 | tail -2
           bash submissions/swift-epoll-akbashev-perf/build.sh 2>&1 | tail -2
+          bash submissions/swift-epoll-akbashev-final/build.sh 2>&1 | tail -2
           inst rust-epoll-theCatWisel
           CARGO_PROFILE_RELEASE_STRIP=none bash submissions/rust-epoll-theCatWisel/build.sh 2>&1 | tail -2
           nm submissions/rust-epoll-theCatWisel/target/release/conduit | wc -l
@@ -59,8 +59,8 @@ jobs:
       - name: profile
         env: { LEVELS: '3000 6000', THINK: '0.1' }
         run: |
-          bash profile/run.sh swift-epoll-akbashev-next swift-epoll-akbashev-perf rust-epoll-theCatWisel \
-                              swift-epoll-akbashev-next swift-epoll-akbashev-perf
+          bash profile/run.sh swift-epoll-akbashev-final swift-epoll-akbashev-perf rust-epoll-theCatWisel \
+                              swift-epoll-akbashev-final swift-epoll-akbashev-perf
       - uses: actions/upload-artifact@v4
         if: always()
         with:
