@@ -27,7 +27,7 @@ jobs:
       - name: Postgres 18 as on the box (PGDG, box/pg-conf.sh, box/sysctl.conf)
         run: |
           for v in $(ls /etc/postgresql 2>/dev/null); do sudo pg_dropcluster --stop "$v" main || true; done
-          grep -l apt.postgresql.org /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          { grep -l apt.postgresql.org /etc/apt/sources.list.d/* 2>/dev/null || true; } | xargs -r sudo rm -f
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/pgdg.gpg
           echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
