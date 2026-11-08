@@ -1,6 +1,6 @@
-# Not for upstream: on an x86 runner, CPU per login and per request for swift-epoll-akbashev against
-# rust-epoll-theCatWisel at #154 (the version it follows, copied to rust-epoll-theCatWisel-154) and at #201, and
-# swift-iouring-Tabonx, under the same loads, with Postgres 18 set up as on the box and the full seed.
+# Not for upstream: on an x86 runner, CPU per login and per request for swift-epoll-akbashev as merged and with the
+# changes in progress (swift-epoll-akbashev-next), against rust-epoll-theCatWisel at #154 (the version it follows,
+# copied to rust-epoll-theCatWisel-154), under the same loads, with Postgres 18 set up as on the box and the full seed.
 name: x86 profile
 on:
   push:
@@ -48,21 +48,19 @@ jobs:
         env: { PGHOST: 127.0.0.1, PGUSER: postgres, PGPASSWORD: postgres }
         run: bash seed/make-seed.sh 2>&1 | tail -12
       - name: install and build
-        # Tabonx first: its install.sh keeps an existing /opt/swift, ours replaces it with 6.4.2 (both link the
-        # standard library statically, so its binary doesn't need it afterwards).
         run: |
           inst() { sudo bash "submissions/$1/install.sh" > "/tmp/install-$1.log" 2>&1 || { tail -30 "/tmp/install-$1.log"; exit 1; }; }
-          inst swift-iouring-Tabonx;   bash submissions/swift-iouring-Tabonx/build.sh 2>&1 | tail -2
-          inst swift-epoll-akbashev;   bash submissions/swift-epoll-akbashev/build.sh 2>&1 | tail -2
+          inst swift-epoll-akbashev
+          bash submissions/swift-epoll-akbashev/build.sh 2>&1 | tail -2
+          bash submissions/swift-epoll-akbashev-next/build.sh 2>&1 | tail -2
           inst rust-epoll-theCatWisel
           bash submissions/rust-epoll-theCatWisel-154/build.sh 2>&1 | tail -2
-          bash submissions/rust-epoll-theCatWisel/build.sh 2>&1 | tail -2
           (cd bench && go build -o .loadgen ./cmd/loadgen && go build -o .logins ./cmd/logins)
       - name: profile
         env: { LEVELS: '3000 6000', THINK: '0.1' }
         run: |
-          bash profile/run.sh swift-epoll-akbashev rust-epoll-theCatWisel-154 rust-epoll-theCatWisel swift-iouring-Tabonx \
-                              rust-epoll-theCatWisel-154 swift-epoll-akbashev swift-iouring-Tabonx rust-epoll-theCatWisel
+          bash profile/run.sh swift-epoll-akbashev swift-epoll-akbashev-next rust-epoll-theCatWisel-154 \
+                              swift-epoll-akbashev-next swift-epoll-akbashev rust-epoll-theCatWisel-154
       - uses: actions/upload-artifact@v4
         if: always()
         with:
