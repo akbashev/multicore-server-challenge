@@ -31,9 +31,13 @@ actor Reactor {
     private let maxEvents = 1024
     /// What this tick routed, for the scheduler.
     private var pending = Submission()
+    /// How long a tick that didn't fill `events` lasts, counted from its epoll_wait.
+    private let passNanos: UInt64
 
-    init(index: Int, loop: EventLoop, signer: TokenSigner, scheduler: Scheduler, host: String, port: UInt16, fdBudget: Int) {
+    init(index: Int, loop: EventLoop, signer: TokenSigner, scheduler: Scheduler, host: String, port: UInt16, fdBudget: Int,
+         passNanos: UInt64) {
         self.index = UInt16(index)
+        self.passNanos = passNanos
         self.loop = loop
         self.signer = signer
         self.scheduler = scheduler
@@ -63,6 +67,7 @@ actor Reactor {
             // One epoll_wait per tick, as the Rust's loop: it blocks here, on this actor's own thread, until a socket is
             // ready or a message (a lane's `deliver`) is queued for the actor.
             let (n, messagesWaiting) = loop.waitForEvents(&events)
+            let turnStarted = Sys.monotonicNanos()
             for i in 0..<n {
                 let base = i * Sys.epollEventStride
                 let flags = events.span.bytes.load(fromByteOffset: base, as: UInt32.self)
@@ -85,6 +90,14 @@ actor Reactor {
             // A lane's replies may have routed pipelined requests: they go to the scheduler now, not after the next
             // wake-up, which may not come.
             if !pending.isEmpty { await submitPending() }
+            // A fixed cadence: a tick that didn't fill `events` lasts `passNanos` from its epoll_wait, so what arrives
+            // meanwhile is routed in the next one and goes to the scheduler in one call with it: one round trip for
+            // many requests. The task waits on this loop, whose thread runs the lanes' deliveries in the meantime. A
+            // full tick goes straight on, so the cadence can't cap throughput.
+            if n > 0 && n < maxEvents && passNanos > 0 {
+                let deadline = turnStarted + passNanos
+                if Sys.monotonicNanos() < deadline { await loop.wait(until: deadline) }
+            }
         }
     }
 

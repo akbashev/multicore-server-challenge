@@ -3,8 +3,6 @@
 # copied to rust-epoll-theCatWisel-154), under the same loads, with Postgres 18 set up as on the box and the full seed.
 name: x86 profile
 on:
-  push:
-    branches: [x86-profile]
   workflow_dispatch:
 permissions:
   contents: read

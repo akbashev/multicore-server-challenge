@@ -138,6 +138,10 @@ final class EventLoop: SerialExecutor, TaskExecutor {
                     job.runSynchronously(isolatedTo: asUnownedSerialExecutor(), taskExecutor: asUnownedTaskExecutor())
                 }
                 batch.removeAll(keepingCapacity: true)
+                // A wait whose deadline passed while jobs kept coming ends now, not at the next idle moment.
+                if let deadline = parked.withLock({ $0?.deadline }), deadline != .max, Sys.monotonicNanos() >= deadline {
+                    interrupt()
+                }
                 continue
             }
             let deadline = parked.withLock { $0?.deadline }

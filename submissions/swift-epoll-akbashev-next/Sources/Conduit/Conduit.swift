@@ -18,6 +18,7 @@ struct Conduit {
         let readWorkers = envInt("READ_LANES", max(cores, 4))
         let writeWorkers = envInt("WRITE_LANES", 1)
         let cryptoWorkers = envInt("BCRYPT_THREADS", max(cores / 2, 3))
+        let passNanos = UInt64(max(envInt("PASS_US", 2000), 0)) * 1000
 
         let calibrationStart = Sys.monotonicNanos()
         let (autoLanes, autoKernel, seedBcryptUs, l1dKB) = Bcrypt.calibrate()
@@ -39,7 +40,7 @@ struct Conduit {
                                   seedBcryptUs: seedBcryptUs)
         let reactors = (0..<ioWorkers).map {
             Reactor(index: $0, loop: EventLoop(name: "io-reactor"), signer: signer, scheduler: scheduler,
-                    host: host, port: port, fdBudget: fdBudget)
+                    host: host, port: port, fdBudget: fdBudget, passNanos: passNanos)
         }
         let readLanes = (0..<readWorkers).map { _ in
             ReadLane(loop: EventLoop(name: "db-read"), db: db, scheduler: scheduler, reactors: reactors)

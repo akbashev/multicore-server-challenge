@@ -1,0 +1,47 @@
+# Not for upstream: swift-epoll-akbashev-next's bcrypt kernels on an x86 runner, four ways: the generator's order
+# (every lane's P word, then every lane's F) or one lane at a time (--sequential), each with LLVM's machine scheduler
+# on or off. Each build runs its start-up calibration three times with BCRYPT_REPORT=1 (every kernel family at 2 to 6
+# lanes, single-threaded), then stops at the Postgres connect.
+name: x86 bcrypt
+on:
+  push:
+    branches: [x86-profile]
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bcrypt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: machine
+        run: lscpu | grep -E 'Model name|^CPU\(s\)|Thread|L1d|L2' ; uname -r
+      - name: install Swift
+        run: sudo bash submissions/swift-epoll-akbashev-next/install.sh > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
+      - name: build four variants
+        run: |
+          export PATH=/opt/swift/usr/bin:$PATH
+          CPU=$(clang -march=native -### -c -x c /dev/null 2>&1 | grep -o '"-target-cpu" "[^"]*"' | cut -d'"' -f4)
+          echo "target-cpu $CPU"
+          for v in order-sched order-nosched seq-sched seq-nosched; do
+            cp -R submissions/swift-epoll-akbashev-next /tmp/$v
+            cd /tmp/$v
+            case $v in seq-*) swift scripts/generate-bcrypt-kernels.swift --sequential > Sources/Conduit/BcryptKernels.swift ;; esac
+            extra=(); case $v in *-nosched) extra=(-Xswiftc -Xllvm -Xswiftc -enable-misched=false) ;; esac
+            swift build -c release -Xswiftc -enforce-exclusivity=unchecked --static-swift-stdlib -Xswiftc -target-cpu -Xswiftc "$CPU" "${extra[@]}" 2>&1 | tail -1
+            cd - > /dev/null
+          done
+      - name: calibrate
+        run: |
+          for round in 1 2 3; do
+            for v in order-sched order-nosched seq-sched seq-nosched; do
+              echo "== $v, round $round"
+              BCRYPT_REPORT=1 DATABASE_URL=postgres://x:x@127.0.0.1:1/x JWT_SECRET=x PORT=3999 timeout 60 \
+                /tmp/$v/.build/release/Conduit 2>&1 | grep -E "^bcrypt " || true
+            done
+          done
