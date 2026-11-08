@@ -110,7 +110,8 @@ bodies are `[UInt8]`), and messages are per epoll tick or per batch, never per r
 
 `IO_THREADS` (cores / 2), `READ_LANES` (cores), `WRITE_LANES` (cores / 2, 2 to 4), `BCRYPT_THREADS` (cores / 2, at
 least 3), `BCRYPT_LANES` (calibrated), `BCRYPT_KERNEL` (`constant`, or `shrx` on x86-64; calibrated), `PASS_US`
-(a reactor pass's least length, 2000), `LOOP_NICE` (5) and `BCRYPT_NICE` (10). Cores are the process's affinity
+(a reactor pass's least length, 2000), `LOOP_NICE` (5), `BCRYPT_NICE` (10) and `BCRYPT_WAIT` (`full`: wait up to
+two bcrypt runs, uncapped, for a full lane set). Cores are the process's affinity
 mask. Postgres connections: `READ_LANES + WRITE_LANES`.
 
 ## Correctness
