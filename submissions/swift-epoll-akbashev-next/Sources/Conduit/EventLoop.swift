@@ -3,7 +3,8 @@
 // threads meet: a Mutex), and the thread runs them one at a time, in order. With no job to run it sleeps in
 // epoll_wait on the eventfd, the only place any thread of the server blocks waiting for work (Postgres reads block in
 // the lanes' jobs, as in the Rust). A reactor blocks in epoll_wait itself, on an instance with its sockets registered
-// next to the eventfd (`waitForEvents`); the scheduler waits for a deadline or `interrupt()` (`wait(until:)`).
+// next to the eventfd (`waitForEvents`); a lane or worker waiting for the scheduler, and a reactor between passes,
+// wait for a deadline or `interrupt()` (`wait(until:)`).
 import Glibc
 import Synchronization
 import Syscalls
@@ -19,15 +20,17 @@ final class EventLoop: SerialExecutor, TaskExecutor {
     static let wakeToken = UInt64.max
 
     private let jobs = Mutex<[UnownedJob]>([])
-    private let parked = Mutex<Parked?>(nil)
+    private let park = Mutex<Park>(.idle)
     /// The loop is in (or about to enter) epoll_wait: whoever queues a job next writes the eventfd.
     private let sleeping = Atomic<Bool>(false)
     private let threadID = Atomic<UInt>(0)
 
-    private struct Parked: Sendable {
-        let continuation: UnsafeContinuation<Void, Never>
-        /// Monotonic nanoseconds.
-        let deadline: UInt64
+    private enum Park: Sendable {
+        case idle
+        /// A pending `wait`, until `deadline` (monotonic nanoseconds).
+        case waiting(UnsafeContinuation<Void, Never>, deadline: UInt64)
+        /// `interrupt()` came with no wait pending: the next one returns at once.
+        case woken
     }
 
     /// A loop on a thread of its own named `name`, at `nice`.
@@ -79,19 +82,48 @@ final class EventLoop: SerialExecutor, TaskExecutor {
 
     // ---------- waiting, for the actor isolated to this loop ----------
 
-    /// Suspends the caller until `deadline` (monotonic nanoseconds) passes or `interrupt()`. Only the actor isolated
-    /// to this loop calls it, and only one wait is pending at a time.
+    /// Suspends the caller until `deadline` (monotonic nanoseconds) passes or `interrupt()`, which may also have come
+    /// just before. Only the actor isolated to this loop calls it, and only one wait is pending at a time. It can
+    /// return early, so callers check what they wait for again.
     func wait(until deadline: UInt64 = .max) async {
         await withUnsafeContinuation { (continuation: UnsafeContinuation<Void, Never>) in
-            parked.withLock { $0 = Parked(continuation: continuation, deadline: deadline) }
+            let now = park.withLock { p -> Bool in
+                if case .woken = p {
+                    p = .idle
+                    return true
+                }
+                p = .waiting(continuation, deadline: deadline)
+                return false
+            }
+            if now { continuation.resume() }
         }
     }
 
-    /// Ends the pending `wait`, if any.
+    /// Ends the pending `wait`, or the next one if none is pending.
     func interrupt() {
-        parked.withLock { p -> UnsafeContinuation<Void, Never>? in
-            defer { p = nil }
-            return p?.continuation
+        park.withLock { p -> UnsafeContinuation<Void, Never>? in
+            if case .waiting(let continuation, _) = p {
+                p = .idle
+                return continuation
+            }
+            p = .woken
+            return nil
+        }?.resume()
+    }
+
+    /// The pending wait's deadline, if one is pending.
+    private var deadline: UInt64? {
+        park.withLock { p in
+            if case .waiting(_, let deadline) = p { deadline } else { nil }
+        }
+    }
+
+    /// Ends the pending wait if its deadline has passed (never leaving a wake for the next one).
+    private func expire(_ now: UInt64) {
+        park.withLock { p -> UnsafeContinuation<Void, Never>? in
+            guard case .waiting(let continuation, let deadline) = p, deadline <= now else { return nil }
+            p = .idle
+            return continuation
         }?.resume()
     }
 
@@ -140,12 +172,10 @@ final class EventLoop: SerialExecutor, TaskExecutor {
                 }
                 batch.removeAll(keepingCapacity: true)
                 // A wait whose deadline passed while jobs kept coming ends now, not at the next idle moment.
-                if let deadline = parked.withLock({ $0?.deadline }), deadline != .max, Sys.monotonicNanos() >= deadline {
-                    interrupt()
-                }
+                if let deadline, deadline != .max { expire(Sys.monotonicNanos()) }
                 continue
             }
-            let deadline = parked.withLock { $0?.deadline }
+            let deadline = self.deadline
             sleeping.store(true, ordering: .sequentiallyConsistent)
             if !jobs.withLock({ $0.isEmpty }) {
                 sleeping.store(false, ordering: .relaxed)
@@ -161,7 +191,7 @@ final class EventLoop: SerialExecutor, TaskExecutor {
                 _ = sys_read(wakeFD, &value, 8)
             }
             sleeping.store(false, ordering: .relaxed)
-            if let deadline, deadline != .max, Sys.monotonicNanos() >= deadline { interrupt() }
+            if let deadline, deadline != .max { expire(Sys.monotonicNanos()) }
         }
     }
 }

@@ -48,17 +48,17 @@ struct OutgoingReply: Sendable {
 enum ReadOp: Sendable {
     case tags
     case currentUser(id: Int64, token: [UInt8])
-    case login(email: [UInt8], password: [UInt8])
-    case profile(username: [UInt8])
-    case articleBySlug(slug: [UInt8])
+    case login(email: SmallBytes, password: [UInt8])
+    case profile(username: SmallBytes)
+    case articleBySlug(slug: SmallBytes)
     /// A write's read-back; `knownFav` is the favorited flag when the write just set it (a favorite or unfavorite),
     /// so the lane needn't look it up.
     case articleById(id: Int64, knownFav: Bool?)
-    case comments(slug: [UInt8])
+    case comments(slug: SmallBytes)
     case global(lim: Int64, off: Int64)
-    case byTag(tag: [UInt8], lim: Int64, off: Int64)
-    case byAuthor(username: [UInt8], lim: Int64, off: Int64)
-    case byFavorited(username: [UInt8], lim: Int64, off: Int64)
+    case byTag(tag: SmallBytes, lim: Int64, off: Int64)
+    case byAuthor(username: SmallBytes, lim: Int64, off: Int64)
+    case byFavorited(username: SmallBytes, lim: Int64, off: Int64)
     case feed(lim: Int64, off: Int64)
 }
 
@@ -222,6 +222,14 @@ enum Router {
         return decoded
     }
 
+    /// `percentDecode` for a read's key: copied straight into a `SmallBytes` when nothing is escaped.
+    private static func percentDecodeKey(_ src: Span<UInt8>, plus: Bool) -> SmallBytes? {
+        for i in 0..<src.count where src[i] == 0x25 || (plus && src[i] == 0x2B) || src[i] == 0 {
+            return percentDecode(src, plus: plus).map { SmallBytes($0.span) }
+        }
+        return Bytes.isValidUTF8(src) ? SmallBytes(src) : nil
+    }
+
     private static func parsePosInt(_ raw: Span<UInt8>) -> Int64? {
         guard raw.count > 0 else { return nil }
         var value: Int64 = 0
@@ -241,9 +249,9 @@ enum Router {
         var limit: Int64?
         var seenOffset = false
         var offset: Int64?
-        var tag: [UInt8]?
-        var author: [UInt8]?
-        var favorited: [UInt8]?
+        var tag: SmallBytes?
+        var author: SmallBytes?
+        var favorited: SmallBytes?
         var impossibleFilter = false
     }
 
@@ -298,9 +306,9 @@ enum Router {
             case .tag, .author, .favorited:
                 let current = name == .tag ? q.tag : name == .author ? q.author : q.favorited
                 if current == nil {
-                    var value = percentDecode(v, plus: true)
+                    var value = percentDecodeKey(v, plus: true)
                     if value == nil {
-                        value = []
+                        value = SmallBytes(Span())
                         q.impossibleFilter = true
                     }
                     switch name {
@@ -432,6 +440,9 @@ enum Router {
         func decodeSeg(_ i: Int) -> [UInt8]? {
             segEmpty(i) ? nil : percentDecode(sub.extracting(bounds[i].0..<bounds[i].1), plus: false)
         }
+        func decodeKey(_ i: Int) -> SmallBytes? {
+            segEmpty(i) ? nil : percentDecodeKey(sub.extracting(bounds[i].0..<bounds[i].1), plus: false)
+        }
         let m = req.method
         let isGet = Bytes.equal(m, "GET"), isPost = Bytes.equal(m, "POST"), isPut = Bytes.equal(m, "PUT"), isDelete = Bytes.equal(m, "DELETE")
 
@@ -460,15 +471,15 @@ enum Router {
                 }
             }
             if n == 2 && segIs(0, "articles") && !segEmpty(1) {
-                guard let slug = decodeSeg(1) else { return failNow(404, "not found") }
+                guard let slug = decodeKey(1) else { return failNow(404, "not found") }
                 return optional { read(.articleBySlug(slug: slug), $0) }
             }
             if n == 3 && segIs(0, "articles") && !segEmpty(1) && segIs(2, "comments") {
-                guard let slug = decodeSeg(1) else { return failNow(404, "not found") }
+                guard let slug = decodeKey(1) else { return failNow(404, "not found") }
                 return optional { read(.comments(slug: slug), $0) }
             }
             if n == 2 && segIs(0, "profiles") && !segEmpty(1) {
-                guard let username = decodeSeg(1) else { return failNow(404, "not found") }
+                guard let username = decodeKey(1) else { return failNow(404, "not found") }
                 return optional { read(.profile(username: username), $0) }
             }
             if n == 1 && segIs(0, "user") {
@@ -554,7 +565,7 @@ enum Router {
             return failNow(422, "email and password are required")
         }
         if email.contains(0) || password.count > bcryptMaxBytes { return failNow(401, "invalid credentials") }
-        return .readFront(ReadTask(op: .login(email: email, password: password), viewer: 0, addr: addr))
+        return .readFront(ReadTask(op: .login(email: SmallBytes(email.span), password: password), viewer: 0, addr: addr))
     }
 
     private static func handleUpdateUser(_ body: Span<UInt8>, _ uid: Int64, _ token: [UInt8], _ addr: ReplyAddr) -> Dispatch {

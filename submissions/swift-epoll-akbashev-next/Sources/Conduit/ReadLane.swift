@@ -61,7 +61,7 @@ extension OutgoingReply {
     }
 }
 
-actor ReadLane {
+actor ReadLane: LoopIsolated {
     nonisolated let loop: EventLoop
     nonisolated var unownedExecutor: UnownedSerialExecutor { loop.asUnownedSerialExecutor() }
 
@@ -119,10 +119,13 @@ actor ReadLane {
     private var follTargets: [Int64] = []
     private var follStarts: [Int32] = []
     private var follEnds: [Int32] = []
-    private var favHits: [Pair] = []
-    private var follHits: [Pair] = []
-    private var favViewerMask: UInt64 = 0
-    private var follViewerMask: UInt64 = 0
+    /// Phase B's favorites and follows as packed (viewer, target) pairs, sorted, behind bit filters: 512 bits over the
+    /// viewers with any of them and 2,048 over each kind's pairs, so most lookups end at one bit.
+    private var favHits: [UInt64] = []
+    private var follHits: [UInt64] = []
+    private var flaggedViewers = InlineArray<8, UInt64>(repeating: 0)
+    private var favPairBits = InlineArray<32, UInt64>(repeating: 0)
+    private var follPairBits = InlineArray<32, UInt64>(repeating: 0)
     private var cachedArts: [CachedArticleSlices] = []
     private var feedDepths: [Int64] = []
     private var tagSortBuf: [Cell] = []
@@ -147,7 +150,7 @@ actor ReadLane {
     func run() async {
         var finished: Scheduler.ReadBatchDone?
         while true {
-            let batch = await scheduler.nextReads(finished: finished)
+            let batch = await scheduler.nextReads(for: self, finished: finished)
             let tasks = batch.tasks
             let t0 = Sys.monotonicNanos()
             out.removeAll()
@@ -343,10 +346,10 @@ actor ReadLane {
         if nA1 > 0 {
             if stTags != nil { conn!.tx.bindAndExec("tags", []) }
             if stUid != nil { conn!.tx.bindAndExec("uid", [.i64Array(kUid.items)]) }
-            if stUemail != nil { conn!.tx.bindAndExec("uemail", [.textArray(kUemail.items)]) }
+            if stUemail != nil { conn!.tx.bindAndExec("uemail", [.keyArray(kUemail.items)]) }
             // A profile carries its viewer's `following` (one EXISTS per profile asked for), so it needs no phase B.
             if stProf != nil {
-                conn!.tx.bindAndExec("prof", [.i64Array(kProf.items.map(\.viewer)), .textArray(kProf.items.map(\.username))])
+                conn!.tx.bindAndExec("prof", [.i64Array(kProf.items.map(\.viewer)), .keyArray(kProf.items.map(\.username))])
             }
             conn!.tx.writeSync()
         }
@@ -361,10 +364,10 @@ actor ReadLane {
             globalWinMax = max(globalWinMax, end.partialValue)
         }
         if nA2 > 0 {
-            if stSlug != nil { conn!.tx.bindAndExec("aslug", [.textArray(kSlug.items)]) }
+            if stSlug != nil { conn!.tx.bindAndExec("aslug", [.keyArray(kSlug.items)]) }
             if stAid != nil { conn!.tx.bindAndExec("aid", [.i64Array(kAid.items)]) }
             if stCmts != nil {
-                conn!.tx.bindAndExec("cmts", [.textArray(kCmts.items), .i64Array(kCmtViewers.items.map(\.a)),
+                conn!.tx.bindAndExec("cmts", [.keyArray(kCmts.items), .i64Array(kCmtViewers.items.map(\.a)),
                                               .i64Array(kCmtViewers.items.map(\.b))])
             }
             if stGlobal != nil {
@@ -377,7 +380,7 @@ actor ReadLane {
             for i in 0..<3 where stFilters[i] != nil {
                 let pages = kFilterPages[i].items
                 conn!.tx.bindAndExec(Self.filterStatementNames[i], [
-                    .textArray(kFilterCounts[i].items),
+                    .keyArray(kFilterCounts[i].items),
                     .i64Array(pages.map { Int64($0.c) + 1 }), .i64Array(pages.map(\.lim)), .i64Array(pages.map(\.off)),
                 ])
             }
@@ -548,8 +551,9 @@ actor ReadLane {
         arena.removeAll()
         favHits.removeAll(keepingCapacity: true)
         follHits.removeAll(keepingCapacity: true)
-        favViewerMask = 0
-        follViewerMask = 0
+        flaggedViewers = InlineArray(repeating: 0)
+        favPairBits = InlineArray(repeating: 0)
+        follPairBits = InlineArray(repeating: 0)
 
         if nB > 0 {
             try conn!.readPipeline(into: &pb, expected: nB)
@@ -571,12 +575,16 @@ actor ReadLane {
                 for ri in pb.resultRows(s) {
                     let r = pb.rows[ri]
                     let kind = pb.i64(r, 0), viewer = pb.i64(r, 1), target = pb.i64(r, 2)
+                    let packed = Self.packPair(viewer, target)
+                    let (w, bit) = Self.viewerBitPosition(viewer)
+                    flaggedViewers[w] |= bit
+                    let (pw, pbit) = Self.pairBitPosition(packed)
                     if kind == 0 {
-                        favViewerMask |= Self.viewerBit(viewer)
-                        favHits.append(Pair(v: viewer, t: target))
+                        favPairBits[pw] |= pbit
+                        favHits.append(packed)
                     } else {
-                        follViewerMask |= Self.viewerBit(viewer)
-                        follHits.append(Pair(v: viewer, t: target))
+                        follPairBits[pw] |= pbit
+                        follHits.append(packed)
                     }
                 }
                 favHits.sort()
@@ -736,7 +744,7 @@ actor ReadLane {
                 break
             }
         }
-        if !logins.isEmpty { await scheduler.submit(Submission(crypto: logins)) }
+        if !logins.isEmpty { scheduler.submit(Submission(crypto: logins)) }
         await send(early)
     }
 
@@ -900,16 +908,26 @@ actor ReadLane {
 
     // ---------- flags and rendering (RenderCtx) ----------
 
+    @inline(__always) private func viewerHasAnyFlag(_ viewer: Int64) -> Bool {
+        guard viewer != 0 else { return false }
+        let (w, bit) = Self.viewerBitPosition(viewer)
+        return flaggedViewers[w] & bit != 0
+    }
+
     @inline(__always) private func isFollowing(_ viewer: Int64, _ author: Int64) -> Bool {
-        follViewerMask & Self.viewerBit(viewer) != 0 && follHits.containsSorted(Pair(v: viewer, t: author))
+        let packed = Self.packPair(viewer, author)
+        let (w, bit) = Self.pairBitPosition(packed)
+        return follPairBits[w] & bit != 0 && follHits.containsSorted(packed)
     }
 
     @inline(__always) private func isFavorited(_ viewer: Int64, _ article: Int64) -> Bool {
-        favViewerMask & Self.viewerBit(viewer) != 0 && favHits.containsSorted(Pair(v: viewer, t: article))
+        let packed = Self.packPair(viewer, article)
+        let (w, bit) = Self.pairBitPosition(packed)
+        return favPairBits[w] & bit != 0 && favHits.containsSorted(packed)
     }
 
     @inline(__always) private func isArticleUnflagged(_ art: ArticleRef, _ viewer: Int64) -> Bool {
-        viewer == 0 || (!isFavorited(viewer, art.aid) && !isFollowing(viewer, art.author))
+        !viewerHasAnyFlag(viewer) || (!isFavorited(viewer, art.aid) && !isFollowing(viewer, art.author))
     }
 
     /// `knownFav`: the favorited flag a write just set, used instead of the looked-up one.
@@ -939,7 +957,7 @@ extension ReadLane {
     /// A profile as one viewer asks for it: the row carries whether that viewer follows it.
     struct ProfileKey: Hashable {
         let viewer: Int64
-        let username: [UInt8]
+        let username: SmallBytes
     }
 
     struct PairKey: Hashable {
@@ -987,7 +1005,7 @@ extension ReadLane {
     struct BytesKeySet {
         private var firstWithHash: [UInt64: UInt32] = [:]
         private var nextWithHash: [UInt32] = []
-        private(set) var items: [[UInt8]] = []
+        private(set) var items: [SmallBytes] = []
 
         var count: Int { items.count }
 
@@ -1006,16 +1024,19 @@ extension ReadLane {
         func ordinal(of key: Span<UInt8>) -> UInt32? {
             var i = firstWithHash[Self.hash(key)] ?? .max
             while i != .max {
-                let candidate = items[Int(i)]
-                if sameBytes(candidate.span, key) { return i }
+                if items[Int(i)].withSpan({ sameBytes($0, key) }) { return i }
                 i = nextWithHash[Int(i)]
             }
             return nil
         }
 
-        mutating func intern(_ key: [UInt8]) -> UInt32 {
-            if let i = ordinal(of: key.span) { return i }
-            let h = Self.hash(key.span)
+        mutating func intern(_ key: SmallBytes) -> UInt32 {
+            let h = key.withSpan { Self.hash($0) }
+            var j = firstWithHash[h] ?? .max
+            while j != .max {
+                if items[Int(j)] == key { return j }
+                j = nextWithHash[Int(j)]
+            }
             let i = UInt32(items.count)
             nextWithHash.append(firstWithHash[h] ?? .max)
             firstWithHash[h] = i
@@ -1085,8 +1106,21 @@ extension ReadLane {
         static func < (a: Pair, b: Pair) -> Bool { a.v != b.v ? a.v < b.v : a.t < b.t }
     }
 
-    @inline(__always) private static func viewerBit(_ viewer: Int64) -> UInt64 {
-        1 << ((UInt64(bitPattern: viewer) &* 0x9E37_79B9_7F4A_7C15) >> 58)
+    /// A viewer and a target in one word (`pack_pair`): the viewer's id in the high half, the target's in the low.
+    @inline(__always) private static func packPair(_ viewer: Int64, _ target: Int64) -> UInt64 {
+        UInt64(bitPattern: viewer) << 32 | UInt64(UInt32(truncatingIfNeeded: target))
+    }
+
+    /// Which word and bit of the 512-bit viewer filter `viewer` sets.
+    @inline(__always) private static func viewerBitPosition(_ viewer: Int64) -> (Int, UInt64) {
+        let h = (UInt64(bitPattern: viewer) &* 0x9E37_79B9_7F4A_7C15) >> 55
+        return (Int(h >> 6), 1 << (h & 63))
+    }
+
+    /// Which word and bit of a 2,048-bit pair filter `packed` sets.
+    @inline(__always) private static func pairBitPosition(_ packed: UInt64) -> (Int, UInt64) {
+        let h = (packed &* 0x9E37_79B9_7F4A_7C15) >> 53
+        return (Int(h >> 6), 1 << (h & 63))
     }
 
     @inline(__always) private static func lexLess(_ a: Span<UInt8>, _ b: Span<UInt8>) -> Bool {
@@ -1136,8 +1170,8 @@ extension ReadLane {
     }
 }
 
-extension Array where Element == ReadLane.Pair {
-    fileprivate func containsSorted(_ x: ReadLane.Pair) -> Bool {
+extension Array where Element: Comparable {
+    fileprivate func containsSorted(_ x: Element) -> Bool {
         var lo = 0
         var hi = count
         while lo < hi {
@@ -1146,7 +1180,9 @@ extension Array where Element == ReadLane.Pair {
         }
         return lo < count && self[lo] == x
     }
+}
 
+extension Array where Element == ReadLane.Pair {
     fileprivate mutating func sortAndDedup() {
         sort()
         var w = 0

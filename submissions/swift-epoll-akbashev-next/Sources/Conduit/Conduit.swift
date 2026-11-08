@@ -1,7 +1,7 @@
 // main.rs: configuration, the start-up checks (bcrypt calibration, every statement prepared once), and the server
 // itself as one task group: a child task per actor, each starting on that actor's own event loop. The Rust's thread
-// layout, one actor per thread: IO reactors (cores / 2), read lanes (cores), write lanes (cores / 2, 2 to 4), bcrypt
-// workers (cores / 2, at least 3), and the scheduler that holds the queues.
+// layout, one actor per thread: IO reactors (cores / 2), read lanes (cores), write lanes (cores / 2, 2 to 4) and bcrypt
+// workers (cores / 2, at least 3). The scheduler that holds the queues is shared state behind a lock, as in the Rust.
 import Glibc
 
 @main
@@ -40,8 +40,7 @@ struct Conduit {
         }
         let fdBudget = Sys.probeNofileLimit()
 
-        let scheduler = Scheduler(loop: EventLoop(name: "scheduler"), readWorkers: readWorkers, bcryptLanes: bcryptLanes,
-                                  seedBcryptUs: seedBcryptUs)
+        let scheduler = Scheduler(readWorkers: readWorkers, bcryptLanes: bcryptLanes, seedBcryptUs: seedBcryptUs)
         let reactors = (0..<ioWorkers).map {
             Reactor(index: $0, loop: EventLoop(name: "io-reactor", nice: loopNice), signer: signer, scheduler: scheduler,
                     host: host, port: port, fdBudget: fdBudget, passNanos: passNanos)
@@ -62,7 +61,6 @@ struct Conduit {
             + "bcrypt cost 10 = \(seedBcryptUs / 1000) ms per \(autoLanes)-lane batch, calibrated in \(calibrationMs) ms)")
 
         await withDiscardingTaskGroup { group in
-            group.addTask(executorPreference: scheduler.loop) { await scheduler.run() }
             for lane in readLanes { group.addTask(executorPreference: lane.loop) { await lane.run() } }
             for lane in writeLanes { group.addTask(executorPreference: lane.loop) { await lane.run() } }
             for worker in crypto { group.addTask(executorPreference: worker.loop) { await worker.run() } }
