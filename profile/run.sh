@@ -80,6 +80,10 @@ P
     echo "   by symbol (top 45):"
     sudo perf report -i "$OUT/$tag.$name.perf.data" --stdio --no-children --sort symbol 2>/dev/null \
       | grep -v '^#' | grep -v '^$' | head -45 | demangle | cut -c1-160 | sed 's/^/   /'
+    sudo perf report -i "$OUT/$tag.$name.perf.data" --stdio --no-children --sort comm,dso,symbol 2>/dev/null \
+      | grep -v '^#' | grep -v '^$' | demangle > "$OUT/$tag.$name.bythread.txt"
+    echo "   by thread kind and symbol:"
+    python3 profile/bykind.py "$OUT/$tag.$name.bythread.txt" io-reactor db-read db-write crypto
   }
 
   step 2000 warmup 20
