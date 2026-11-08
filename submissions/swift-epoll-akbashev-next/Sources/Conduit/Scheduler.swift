@@ -26,12 +26,12 @@ actor Scheduler {
 
     private var crypto = TaskQueue<CryptoTask>()
     private var cryptoSince: UInt64?
-    private var cryptoWaiters: [CheckedContinuation<[CryptoTask], Never>] = []
-    private var cryptoGather: Gather?
+    private var cryptoWaiters: [(worker: Int, continuation: CheckedContinuation<[CryptoTask], Never>)] = []
     private var cryptoDeadline = UInt64.max
     private var busyCryptoWorkers = 0
     private var ewmaBcryptUs: Int
-    private var ewmaCryptoLen = 0
+    /// How long bcrypt jobs wait for a full lane set before worker 0 runs them as they are.
+    private let bcryptFillNanos: UInt64
 
     private var writes = TaskQueue<WriteTask>()
     private var writeWaiters: [CheckedContinuation<[WriteTask], Never>] = []
@@ -39,8 +39,9 @@ actor Scheduler {
     /// Requests whose connection closed while they were queued.
     private var cancelled = Set<ReplyAddr>()
 
-    init(loop: EventLoop, readWorkers: Int, bcryptLanes: Int, seedBcryptUs: Int) {
+    init(loop: EventLoop, readWorkers: Int, bcryptLanes: Int, seedBcryptUs: Int, bcryptFillMs: Int) {
         self.loop = loop
+        bcryptFillNanos = UInt64(max(bcryptFillMs, 0)) * 1_000_000
         self.readWorkers = readWorkers
         self.bcryptLanes = bcryptLanes
         let families = Catalog.reads().count
@@ -125,7 +126,8 @@ actor Scheduler {
 
     // ---------- bcrypt ----------
 
-    func nextCrypto(finished: Scheduler.CryptoBatchDone?) async -> [CryptoTask] {
+    /// The next lane set for bcrypt worker `worker`, which reports how its last one went.
+    func nextCrypto(worker: Int, finished: Scheduler.CryptoBatchDone?) async -> [CryptoTask] {
         if let f = finished {
             busyCryptoWorkers -= 1
             if let us = f.standardUs {
@@ -134,17 +136,10 @@ actor Scheduler {
             }
         }
         return await withCheckedContinuation { continuation in
-            cryptoWaiters.append(continuation)
-            if cryptoWaiters.count == 1 { cryptoGather = computeCryptoGather() }
+            cryptoWaiters.append((worker, continuation))
             evaluate()
             loop.interrupt()
         }
-    }
-
-    private func computeCryptoGather() -> Gather {
-        let lanes = max(bcryptLanes, 1)
-        let ageUs = busyCryptoWorkers == 0 && ewmaCryptoLen <= 1 ? max(ewmaBcryptUs / (lanes * 2), 1) : max(ewmaBcryptUs * 2, 1)
-        return Gather(want: lanes, maxAge: UInt64(ageUs) * 1000, maxCap: lanes)
     }
 
     // ---------- writes ----------
@@ -187,25 +182,27 @@ actor Scheduler {
             // the batch lock, and computes its window, the moment this one releases it).
             readGather = readWaiters.isEmpty ? nil : computeReadGather()
         }
+        // A full lane set goes to whichever bcrypt worker asks first. A part-filled one only to worker 0, and only once
+        // its oldest job has waited `bcryptFillNanos`: per hash, a full set costs about half of what a run of one or
+        // two does, so a trickle of logins waits for company instead of running alone.
         cryptoDeadline = .max
+        let lanes = max(bcryptLanes, 1)
         while !cryptoWaiters.isEmpty && !crypto.isEmpty {
-            if cryptoGather == nil { cryptoGather = computeCryptoGather() }
-            let g = cryptoGather!
-            if g.maxAge > 0 && crypto.count < g.want {
-                let deadline = (cryptoSince ?? now) + g.maxAge
+            var w = 0
+            if crypto.count < lanes {
+                guard let first = cryptoWaiters.firstIndex(where: { $0.worker == 0 }) else { break }
+                let deadline = (cryptoSince ?? now) + bcryptFillNanos
                 if now < deadline {
                     cryptoDeadline = deadline
                     break
                 }
+                w = first
             }
-            var batch = crypto.take(min(crypto.count, g.maxCap))
+            var batch = crypto.take(min(crypto.count, lanes))
             cryptoSince = crypto.isEmpty ? nil : now
-            cryptoGather = nil
             busyCryptoWorkers += 1
-            ewmaCryptoLen = ewmaCryptoLen == 0 ? batch.count : (ewmaCryptoLen * 3 + batch.count) / 4
             if !cancelled.isEmpty { batch.removeAll { cancelled.contains($0.addr) } }
-            cryptoWaiters.removeFirst().resume(returning: batch)
-            cryptoGather = cryptoWaiters.isEmpty ? nil : computeCryptoGather()
+            cryptoWaiters.remove(at: w).continuation.resume(returning: batch)
         }
         if reads.isEmpty && crypto.isEmpty && !cancelled.isEmpty { cancelled.removeAll(keepingCapacity: true) }
     }

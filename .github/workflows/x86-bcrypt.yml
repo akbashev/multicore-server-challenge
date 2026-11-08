@@ -4,8 +4,6 @@
 # lanes, single-threaded), then stops at the Postgres connect.
 name: x86 bcrypt
 on:
-  push:
-    branches: [x86-profile]
   workflow_dispatch:
 permissions:
   contents: read

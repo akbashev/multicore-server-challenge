@@ -30,7 +30,8 @@ final class EventLoop: SerialExecutor, TaskExecutor {
         let deadline: UInt64
     }
 
-    init(name: String) {
+    /// A loop on a thread of its own named `name`, at `nice`.
+    init(name: String, nice: Int32 = 0) {
         epollFD = sys_epoll_create1(Sys.EPOLL_CLOEXEC)
         idleFD = sys_epoll_create1(Sys.EPOLL_CLOEXEC)
         wakeFD = sys_eventfd(0, Sys.EFD_NONBLOCK | Sys.EFD_CLOEXEC)
@@ -40,7 +41,7 @@ final class EventLoop: SerialExecutor, TaskExecutor {
                 fatalError("epoll_ctl eventfd: \(errno)")
             }
         }
-        Sys.startThread(name: name) { [self] in run() }
+        Sys.startThread(name: name, nice: nice) { [self] in run() }
     }
 
     /// epoll_ctl with an event built at the ABI's offsets (see `Sys.epollDataOffset`).

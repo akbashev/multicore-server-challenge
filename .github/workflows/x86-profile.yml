@@ -53,16 +53,13 @@ jobs:
           bash submissions/swift-epoll-akbashev/build.sh 2>&1 | tail -2
           bash submissions/swift-epoll-akbashev-next/build.sh 2>&1 | tail -2
           inst rust-epoll-theCatWisel
-          bash submissions/rust-epoll-theCatWisel-154/build.sh 2>&1 | tail -2
           bash submissions/rust-epoll-theCatWisel/build.sh 2>&1 | tail -2
           (cd bench && go build -o .loadgen ./cmd/loadgen && go build -o .logins ./cmd/logins)
       - name: profile
         env: { LEVELS: '3000 6000', THINK: '0.1' }
         run: |
-          bash profile/run.sh swift-epoll-akbashev swift-epoll-akbashev-next swift-epoll-akbashev-next-nocadence \
-                              rust-epoll-theCatWisel-154 rust-epoll-theCatWisel \
-                              swift-epoll-akbashev-next-nocadence swift-epoll-akbashev-next swift-epoll-akbashev \
-                              rust-epoll-theCatWisel rust-epoll-theCatWisel-154
+          bash profile/run.sh swift-epoll-akbashev swift-epoll-akbashev-next rust-epoll-theCatWisel \
+                              rust-epoll-theCatWisel swift-epoll-akbashev-next swift-epoll-akbashev
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -177,20 +177,24 @@ extension Sys {
     /// A thread's body on its way through pthread_create.
     private final class ThreadStart: Sendable {
         let name: String
+        let nice: Int32
         let body: @Sendable () -> Void
-        init(name: String, body: @escaping @Sendable () -> Void) {
+        init(name: String, nice: Int32, body: @escaping @Sendable () -> Void) {
             self.name = name
+            self.nice = nice
             self.body = body
         }
     }
 
     /// Starts a detached thread named `name` running `body`.
-    static func startThread(name: String, _ body: @escaping @Sendable () -> Void) {
-        let start = Unmanaged.passRetained(ThreadStart(name: name, body: body)).toOpaque()
+    /// A thread running `body`, at `nice` (only this thread: on Linux a thread is a task of its own to setpriority).
+    static func startThread(name: String, nice: Int32 = 0, _ body: @escaping @Sendable () -> Void) {
+        let start = Unmanaged.passRetained(ThreadStart(name: name, nice: nice, body: body)).toOpaque()
         var thread = pthread_t()
         let rc = pthread_create(&thread, nil, { raw in
             let start = Unmanaged<ThreadStart>.fromOpaque(raw!).takeRetainedValue()
             _ = sys_pthread_setname_np(pthread_self(), String(start.name.prefix(15)))
+            if start.nice != 0 { _ = sys_setpriority(0, UInt32(bitPattern: sys_gettid()), start.nice) }
             start.body()
             return nil
         }, start)
