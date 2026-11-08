@@ -58,8 +58,8 @@ jobs:
       - name: profile
         env: { LEVELS: '3000 6000', THINK: '0.1' }
         run: |
-          bash profile/run.sh swift-epoll-akbashev swift-epoll-akbashev-next rust-epoll-theCatWisel \
-                              swift-epoll-akbashev-next
+          bash profile/run.sh swift-epoll-akbashev swift-epoll-akbashev-b3f6466 swift-epoll-akbashev-next \
+                              rust-epoll-theCatWisel swift-epoll-akbashev-next
       - uses: actions/upload-artifact@v4
         if: always()
         with:

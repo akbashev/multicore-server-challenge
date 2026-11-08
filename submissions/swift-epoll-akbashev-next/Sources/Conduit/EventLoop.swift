@@ -33,8 +33,14 @@ final class EventLoop: SerialExecutor, TaskExecutor {
         case woken
     }
 
-    /// A loop on a thread of its own named `name`, at `nice`.
-    init(name: String, nice: Int32 = 0) {
+    private let name: String
+    private let nice: Int32
+
+    /// A loop on a thread named `name`, at `nice`: one of its own, or with `onCallingThread` the thread that calls
+    /// `runOnCallingThread()` once it is done with everything else (the main thread, after start-up).
+    init(name: String, nice: Int32 = 0, onCallingThread: Bool = false) {
+        self.name = name
+        self.nice = nice
         epollFD = sys_epoll_create1(Sys.EPOLL_CLOEXEC)
         idleFD = sys_epoll_create1(Sys.EPOLL_CLOEXEC)
         wakeFD = sys_eventfd(0, Sys.EFD_NONBLOCK | Sys.EFD_CLOEXEC)
@@ -44,7 +50,13 @@ final class EventLoop: SerialExecutor, TaskExecutor {
                 fatalError("epoll_ctl eventfd: \(errno)")
             }
         }
-        Sys.startThread(name: name, nice: nice) { [self] in run() }
+        if !onCallingThread { Sys.startThread(name: name, nice: nice) { [self] in run() } }
+    }
+
+    /// Gives the calling thread to this loop, for good.
+    func runOnCallingThread() -> Never {
+        Sys.nameThisThread(name, nice: nice)
+        run()
     }
 
     /// epoll_ctl with an event built at the ABI's offsets (see `Sys.epollDataOffset`).
