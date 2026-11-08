@@ -1,6 +1,7 @@
 # Not for upstream: on an x86 runner, CPU per login and per request for swift-epoll-akbashev as merged and with the
-# changes in progress (swift-epoll-akbashev-next), against rust-epoll-theCatWisel at #154 (the version it follows,
-# copied to rust-epoll-theCatWisel-154), under the same loads, with Postgres 18 set up as on the box and the full seed.
+# changes in progress (swift-epoll-akbashev-next, and the same with its fixed pass length off), against
+# rust-epoll-theCatWisel at #154 (the version it follows, copied to rust-epoll-theCatWisel-154) and at #201 (current),
+# under the same loads, with Postgres 18 set up as on the box and the full seed.
 name: x86 profile
 on:
   workflow_dispatch:
@@ -13,7 +14,7 @@ defaults:
 jobs:
   profile:
     runs-on: ubuntu-24.04
-    timeout-minutes: 170
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -53,12 +54,15 @@ jobs:
           bash submissions/swift-epoll-akbashev-next/build.sh 2>&1 | tail -2
           inst rust-epoll-theCatWisel
           bash submissions/rust-epoll-theCatWisel-154/build.sh 2>&1 | tail -2
+          bash submissions/rust-epoll-theCatWisel/build.sh 2>&1 | tail -2
           (cd bench && go build -o .loadgen ./cmd/loadgen && go build -o .logins ./cmd/logins)
       - name: profile
         env: { LEVELS: '3000 6000', THINK: '0.1' }
         run: |
-          bash profile/run.sh swift-epoll-akbashev swift-epoll-akbashev-next rust-epoll-theCatWisel-154 \
-                              swift-epoll-akbashev-next swift-epoll-akbashev rust-epoll-theCatWisel-154
+          bash profile/run.sh swift-epoll-akbashev swift-epoll-akbashev-next swift-epoll-akbashev-next-nocadence \
+                              rust-epoll-theCatWisel-154 rust-epoll-theCatWisel \
+                              swift-epoll-akbashev-next-nocadence swift-epoll-akbashev-next swift-epoll-akbashev \
+                              rust-epoll-theCatWisel rust-epoll-theCatWisel-154
       - uses: actions/upload-artifact@v4
         if: always()
         with:
