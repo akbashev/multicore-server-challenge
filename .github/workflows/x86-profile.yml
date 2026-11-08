@@ -1,0 +1,73 @@
+# Not for upstream: on an x86 runner, CPU per login and per request for swift-epoll-akbashev against
+# rust-epoll-theCatWisel at #154 (the version it follows, copied to rust-epoll-theCatWisel-154) and at #201, and
+# swift-iouring-Tabonx, under the same loads, with Postgres 18 set up as on the box and the full seed.
+name: x86 profile
+on:
+  push:
+    branches: [x86-profile]
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: bench/go.mod, cache-dependency-path: bench/go.sum }
+      - name: machine
+        run: |
+          lscpu | grep -E 'Model name|^CPU\(s\)|Thread|MHz|L1d|L2|L3|Flags' | cut -c1-400
+          uname -r; free -m; df -h / | tail -1
+      - name: Postgres 18 as on the box (PGDG, box/pg-conf.sh, box/sysctl.conf)
+        run: |
+          for v in $(ls /etc/postgresql 2>/dev/null); do sudo pg_dropcluster --stop "$v" main || true; done
+          grep -l apt.postgresql.org /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor --yes -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-18 postgresql-client-18 jq curl
+          sudo apt-get install -y -qq linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y -qq linux-tools-generic
+          PGD=/etc/postgresql/18/main
+          sudo sed -ri "s/^#?listen_addresses\s*=.*/listen_addresses = 'localhost'/" $PGD/postgresql.conf
+          sudo grep -q "^include_dir = 'conf.d'" $PGD/postgresql.conf || echo "include_dir = 'conf.d'" | sudo tee -a $PGD/postgresql.conf
+          sudo bash box/pg-conf.sh
+          sudo install -m 644 box/sysctl.conf /etc/sysctl.d/90-challenge.conf && sudo sysctl -q --system
+          sudo systemctl restart postgresql@18-main
+          for _ in $(seq 30); do sudo -u postgres pg_isready -q && break; sleep 1; done
+          sudo -u postgres psql -qX -c "ALTER USER postgres PASSWORD 'postgres'"
+          pg_lsclusters
+          echo "PGPORT=$(pg_lsclusters -h | awk '$1 == 18 {print $3}')" >> "$GITHUB_ENV"
+      - name: full seed
+        env: { PGHOST: 127.0.0.1, PGUSER: postgres, PGPASSWORD: postgres }
+        run: bash seed/make-seed.sh 2>&1 | tail -12
+      - name: install and build
+        # Tabonx first: its install.sh keeps an existing /opt/swift, ours replaces it with 6.4.2 (both link the
+        # standard library statically, so its binary doesn't need it afterwards).
+        run: |
+          inst() { sudo bash "submissions/$1/install.sh" > "/tmp/install-$1.log" 2>&1 || { tail -30 "/tmp/install-$1.log"; exit 1; }; }
+          inst swift-iouring-Tabonx;   bash submissions/swift-iouring-Tabonx/build.sh 2>&1 | tail -2
+          inst swift-epoll-akbashev;   bash submissions/swift-epoll-akbashev/build.sh 2>&1 | tail -2
+          inst rust-epoll-theCatWisel
+          bash submissions/rust-epoll-theCatWisel-154/build.sh 2>&1 | tail -2
+          bash submissions/rust-epoll-theCatWisel/build.sh 2>&1 | tail -2
+          (cd bench && go build -o .loadgen ./cmd/loadgen && go build -o .logins ./cmd/logins)
+      - name: profile
+        env: { LEVELS: '3000 6000', THINK: '0.1' }
+        run: |
+          bash profile/run.sh swift-epoll-akbashev rust-epoll-theCatWisel-154 rust-epoll-theCatWisel swift-iouring-Tabonx \
+                              rust-epoll-theCatWisel-154 swift-epoll-akbashev swift-iouring-Tabonx rust-epoll-theCatWisel
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profile
+          path: |
+            profile/out/*.txt
+            profile/out/*.json
+          retention-days: 7
