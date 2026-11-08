@@ -1,11 +1,12 @@
 // swift-tools-version:6.2
 import PackageDescription
 
-// The host is the machine the server runs on (build.sh builds on the box), so its architecture picks the flags.
+// The host is the machine the server runs on (build.sh builds on the box), so its architecture picks the flags; on
+// others SHAExtensions is empty.
 #if arch(x86_64)
-let shaFlags = ["-parse-stdlib", "-Xcc", "-msha", "-Xcc", "-mssse3", "-Xcc", "-msse4.1"]
+let shaFlags = ["-enable-builtin-module", "-Xcc", "-msha", "-Xcc", "-mssse3", "-Xcc", "-msse4.1"]
 #else
-let shaFlags = ["-parse-stdlib"]
+let shaFlags: [String] = []
 #endif
 
 let package = Package(
@@ -13,8 +14,8 @@ let package = Package(
     // Linux only (epoll, eventfd, accept4, unshare). No dependencies: Swift's standard library, Synchronization and
     // Glibc.
     targets: [
-        // SHA-256 on the x86 SHA extensions, reached through Swift's `Builtin` module (-parse-stdlib), with the
-        // instructions enabled for this module alone; Conduit calls it only on a CPU that has them.
+        // SHA-256 on the x86 SHA extensions, reached through Swift's `Builtin` module (-enable-builtin-module), with
+        // the instructions enabled for this module alone; Conduit calls it only on a CPU that has them.
         .target(
             name: "SHAExtensions",
             path: "Sources/SHAExtensions",

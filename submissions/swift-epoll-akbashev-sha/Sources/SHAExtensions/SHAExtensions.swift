@@ -1,11 +1,11 @@
 // SHA-256's compression function with the x86 SHA extensions (SHA-NI), as the Rust's `compress_words_shani`. Swift
-// reaches the instructions only through its `Builtin` module, so this module is built with -parse-stdlib, and with
-// the SHA, SSSE3 and SSE4.1 instructions enabled (Package.swift): only a CPU that has them may run any of it. Conduit
-// checks the CPU first and keeps its own Swift compression function otherwise; nothing here is inlinable, so none of
-// it lands in code built without them.
-import Swift
-
+// reaches the instructions only through its `Builtin` module, which this module imports (with the compiler's
+// -enable-builtin-module, a hidden flag, as is the module), and it is built with the SHA, SSSE3 and SSE4.1 instructions
+// enabled (Package.swift): only a CPU that has them may run any of it. Conduit checks the CPU first and keeps its own
+// Swift compression function otherwise; nothing here is inlinable, so none of it lands in code built without them.
 #if arch(x86_64)
+import Builtin
+
 /// Compresses the `blocks` 64-byte blocks at `data` into `state`, SHA-256's eight words a...h. Never inlined: its
 /// instructions must stay in this module.
 @inline(never) public func compress(_ state: UnsafeMutablePointer<UInt32>, _ data: UnsafeRawPointer, blocks: Int) {
