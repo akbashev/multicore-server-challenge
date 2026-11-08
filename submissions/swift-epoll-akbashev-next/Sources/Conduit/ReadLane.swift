@@ -147,7 +147,8 @@ actor ReadLane {
     func run() async {
         var finished: Scheduler.ReadBatchDone?
         while true {
-            let tasks = await scheduler.nextReads(finished: finished)
+            let batch = await scheduler.nextReads(finished: finished)
+            let tasks = batch.tasks
             let t0 = Sys.monotonicNanos()
             out.removeAll()
             var replies: [OutgoingReply] = []
@@ -159,7 +160,7 @@ actor ReadLane {
                 conn = nil
                 replies = errorAddrs.map { OutgoingReply.error($0, 500, "internal server error") }
             }
-            finished = Scheduler.ReadBatchDone(count: tasks.count, elapsedUs: Int((Sys.monotonicNanos() - t0) / 1000))
+            finished = Scheduler.ReadBatchDone(queue: batch.queue, count: tasks.count, elapsedUs: Int((Sys.monotonicNanos() - t0) / 1000))
             await send(replies)
         }
     }

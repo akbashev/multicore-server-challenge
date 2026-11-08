@@ -1,7 +1,7 @@
 // main.rs: configuration, the start-up checks (bcrypt calibration, every statement prepared once), and the server
 // itself as one task group: a child task per actor, each starting on that actor's own event loop. The Rust's thread
-// layout, one actor per thread: IO reactors (cores / 2), read lanes (cores), the write lane, bcrypt workers
-// (cores / 2, at least 3), and the scheduler that holds the queues.
+// layout, one actor per thread: IO reactors (cores / 2), read lanes (cores), write lanes (cores / 2, 2 to 4), bcrypt
+// workers (cores / 2, at least 3), and the scheduler that holds the queues.
 import Glibc
 
 @main
@@ -41,7 +41,7 @@ struct Conduit {
         let fdBudget = Sys.probeNofileLimit()
 
         let scheduler = Scheduler(loop: EventLoop(name: "scheduler"), readWorkers: readWorkers, bcryptLanes: bcryptLanes,
-                                  seedBcryptUs: seedBcryptUs, bcryptFillMs: envInt("BCRYPT_FILL_MS", 200))
+                                  seedBcryptUs: seedBcryptUs)
         let reactors = (0..<ioWorkers).map {
             Reactor(index: $0, loop: EventLoop(name: "io-reactor", nice: loopNice), signer: signer, scheduler: scheduler,
                     host: host, port: port, fdBudget: fdBudget, passNanos: passNanos)
@@ -53,7 +53,7 @@ struct Conduit {
             WriteLane(loop: EventLoop(name: "db-write"), db: db, scheduler: scheduler, reactors: reactors, signer: signer)
         }
         let crypto = (0..<cryptoWorkers).map { i in
-            CryptoWorker(index: i, loop: EventLoop(name: "crypto", nice: i == 0 ? 0 : bcryptNice), scheduler: scheduler,
+            CryptoWorker(loop: EventLoop(name: "crypto", nice: i == 0 ? 0 : bcryptNice), scheduler: scheduler,
                          reactors: reactors, signer: signer, kernel: bcryptKernel)
         }
 

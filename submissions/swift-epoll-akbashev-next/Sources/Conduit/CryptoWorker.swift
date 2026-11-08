@@ -7,10 +7,6 @@ actor CryptoWorker {
     nonisolated let loop: EventLoop
     nonisolated var unownedExecutor: UnownedSerialExecutor { loop.asUnownedSerialExecutor() }
 
-    /// 0 for the worker that runs a partly filled lane set once its oldest job has waited long enough; the others run
-    /// full sets only.
-    private let index: Int
-
     private let scheduler: Scheduler
     private let reactors: [Reactor]
     /// Replies sorted by reactor for a delivery, kept from one to the next.
@@ -18,8 +14,7 @@ actor CryptoWorker {
     private let signer: TokenSigner
     private let kernel: Bcrypt.Kernel
 
-    init(index: Int, loop: EventLoop, scheduler: Scheduler, reactors: [Reactor], signer: TokenSigner, kernel: Bcrypt.Kernel) {
-        self.index = index
+    init(loop: EventLoop, scheduler: Scheduler, reactors: [Reactor], signer: TokenSigner, kernel: Bcrypt.Kernel) {
         self.loop = loop
         self.scheduler = scheduler
         self.reactors = reactors
@@ -30,7 +25,7 @@ actor CryptoWorker {
     func run() async {
         var finished: Scheduler.CryptoBatchDone?
         while true {
-            let batch = await scheduler.nextCrypto(worker: index, finished: finished)
+            let batch = await scheduler.nextCrypto(finished: finished)
             let t0 = Sys.monotonicNanos()
             var standard: [CryptoTask] = []
             var other: [CryptoTask] = []

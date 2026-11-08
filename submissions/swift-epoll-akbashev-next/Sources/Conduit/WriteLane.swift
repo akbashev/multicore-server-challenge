@@ -1,4 +1,4 @@
-// engine.rs's WriteWorker: the write lane. Every write waiting is pipelined before one Sync, which makes them one
+// engine.rs's WriteWorker: a write lane. Each group the scheduler gathers for it is pipelined before one Sync, which makes them one
 // implicit transaction committed at the Sync (group commit); responses go out only after Postgres reports it done.
 // Favorites, follows and new comments of a group run as one `unnest` statement per kind, unless the group also
 // changes what they would read (the same article, or a profile). If any statement fails, each write is retried on
@@ -36,8 +36,10 @@ actor WriteLane {
     }
 
     func run() async {
+        var finished = false
         while true {
-            let tasks = await scheduler.nextWrites()
+            let tasks = await scheduler.nextWrites(finished: finished)
+            finished = true
             var replies: [OutgoingReply] = []
             var postReads: [ReadTask] = []
             do throws(WriteFailure) {
@@ -47,7 +49,7 @@ actor WriteLane {
                 conn = nil
                 replies.append(contentsOf: error.addrs.map { OutgoingReply.error($0, 500, "internal server error") })
             }
-            if !postReads.isEmpty { await scheduler.submit(Submission(reads: postReads)) }
+            if !postReads.isEmpty { await scheduler.submit(Submission(readsFront: postReads)) }
             var b: [[OutgoingReply]] = []
             swap(&b, &buckets)
             await OutgoingReply.deliver(replies, to: reactors, buckets: &b)

@@ -22,6 +22,7 @@ enum Sys {
     static let SO_REUSEPORT: Int32 = 15
     static let IPPROTO_TCP: Int32 = 6
     static let TCP_NODELAY: Int32 = 1
+    static let TCP_QUICKACK: Int32 = 12
     static let IPPROTO_IPV6: Int32 = 41
     static let IPV6_V6ONLY: Int32 = 26
     static let EPOLL_CLOEXEC: Int32 = 0o2000000
@@ -153,6 +154,11 @@ extension Sys {
     /// TCP_NODELAY on an accepted or connected socket.
     @inline(__always) static func setNoDelay(_ fd: Int32) {
         _ = setIntOption(fd, IPPROTO_TCP, TCP_NODELAY, 1)
+    }
+
+    /// TCP_QUICKACK on a connected socket: acknowledge at once rather than after the delayed-ACK timer.
+    @inline(__always) static func setQuickAck(_ fd: Int32) {
+        _ = setIntOption(fd, IPPROTO_TCP, TCP_QUICKACK, 1)
     }
 
     /// Writes all of `bytes` to a blocking descriptor.
