@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: akbashev/million-users-challenge
-          ref: 68b7dc9
+          ref: 68b7dc9ec39bec57bb5c1e8408ba398eab3e56c7
           path: million
       - name: machine
         run: lscpu | grep -E "Model name|^CPU\(s\)"
