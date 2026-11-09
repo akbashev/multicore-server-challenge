@@ -10,9 +10,12 @@
 # SWIFT_SHA256   the tarball's sha256, checked as well as its signature when given
 # SWIFT_PREFIX   where it goes (default /opt/swift); swift and swiftc are linked into /usr/local/bin
 # SWIFT_FULL=1   keeps everything (lldb, sourcekit-lsp, docc, swift-format)
+# SWIFT_SIGNING_KEY  the fingerprint of the key that signs the release (default: the Swift 6.x release key)
 set -euo pipefail
 SWIFT_VERSION=${SWIFT_VERSION:-6.4.2}
 SWIFT_PREFIX=${SWIFT_PREFIX:-/opt/swift}
+# The Swift 6.x release signing key.
+SWIFT_SIGNING_KEY=${SWIFT_SIGNING_KEY:-52BB7E3DE28A71BE22EC05FFEF80A866B47A981F}
 
 . /etc/os-release
 case "${ID}-${VERSION_ID}" in
@@ -40,13 +43,15 @@ trap 'rm -rf "$WORK"' EXIT
 # The signature against swift.org's keys, in a keyring of its own.
 export GNUPGHOME="$WORK/gnupg"
 mkdir -m 700 "$GNUPGHOME"
-# The keys' download sometimes comes back as something else (a page, not a key): a few tries, on both host names.
-for keys in https://www.swift.org/keys/all-keys.asc https://swift.org/keys/all-keys.asc https://www.swift.org/keys/all-keys.asc; do
-  curl -fsSL --retry 3 "$keys" -o "$WORK/keys.asc" && gpg --batch --quiet --import "$WORK/keys.asc" 2> /dev/null && break
-  rm -f "$WORK/keys.asc"
-  sleep 5
+# The release key by its fingerprint from a keyserver, as swift.org's own Docker images get it; failing that, swift.org's
+# key file (which a CDN sometimes answers with a page instead, from CI machines).
+for try in 1 2 3; do
+  gpg --batch --quiet --keyserver hkps://keyserver.ubuntu.com --recv-keys "$SWIFT_SIGNING_KEY" 2> /dev/null && break
+  curl -fsSL https://www.swift.org/keys/all-keys.asc -o "$WORK/keys.asc" && gpg --batch --quiet --import "$WORK/keys.asc" 2> /dev/null \
+    && gpg --batch --list-keys "$SWIFT_SIGNING_KEY" > /dev/null 2>&1 && break
+  sleep $((5 * try))
 done
-[ -f "$WORK/keys.asc" ] || { echo "install-swift: couldn't get swift.org's signing keys" >&2; exit 1; }
+gpg --batch --list-keys "$SWIFT_SIGNING_KEY" > /dev/null 2>&1 || { echo "install-swift: no Swift signing key" >&2; exit 1; }
 curl -fsSL --retry 3 "$URL.sig" -o "$WORK/tarball.sig"
 
 EXCLUDES=()
