@@ -40,8 +40,14 @@ trap 'rm -rf "$WORK"' EXIT
 # The signature against swift.org's keys, in a keyring of its own.
 export GNUPGHOME="$WORK/gnupg"
 mkdir -m 700 "$GNUPGHOME"
-curl -fsSL https://www.swift.org/keys/all-keys.asc | gpg --batch --quiet --import
-curl -fsSL "$URL.sig" -o "$WORK/tarball.sig"
+# The keys' download sometimes comes back as something else (a page, not a key): a few tries, on both host names.
+for keys in https://www.swift.org/keys/all-keys.asc https://swift.org/keys/all-keys.asc https://www.swift.org/keys/all-keys.asc; do
+  curl -fsSL --retry 3 "$keys" -o "$WORK/keys.asc" && gpg --batch --quiet --import "$WORK/keys.asc" 2> /dev/null && break
+  rm -f "$WORK/keys.asc"
+  sleep 5
+done
+[ -f "$WORK/keys.asc" ] || { echo "install-swift: couldn't get swift.org's signing keys" >&2; exit 1; }
+curl -fsSL --retry 3 "$URL.sig" -o "$WORK/tarball.sig"
 
 EXCLUDES=()
 if [ "${SWIFT_FULL:-0}" != 1 ]; then
