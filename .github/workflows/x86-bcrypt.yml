@@ -1,5 +1,5 @@
-# Not for upstream: million's gzip (swift-epoll-akbashev at 68b7dc9, Sources/Gzip; and the one-pass version on ISA-L's
-# default table, gzbench/GzipNew.swift) against ISA-L 2.31.1 at level 0 (as
+# Not for upstream: million's gzip at 68b7dc9 and the new one (gzbench/mu-patch: one pass on ISA-L's default table, the
+# CRC on the carry-less multiply; also timed with the table CRC) against ISA-L 2.31.1 at level 0 (as
 # swift-iouring-Tabonx calls it), libdeflate level 1 and zlib level 1, on feeds the server sends under the load
 # generator's kind of posts; time per feed on one pinned CPU, sizes, a check that each output decompresses, and perf.
 name: x86 gzip
@@ -39,6 +39,15 @@ jobs:
           sudo apt-get install -y -qq postgresql-client jq curl openssl nasm libdeflate-dev zlib1g-dev
           sudo apt-get install -y -qq linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y -qq linux-tools-generic
           sudo sysctl -q kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+      - name: apply the new gzip (the old one kept for timing)
+        working-directory: million
+        run: |
+          D=submissions/swift-epoll-akbashev
+          cp $D/Sources/Gzip/Gzip.swift /tmp/GzipOld.swift
+          cp ../patch/gzbench/mu-patch/Package.swift $D/
+          cp ../patch/gzbench/mu-patch/Sources/Gzip/Gzip.swift $D/Sources/Gzip/
+          mkdir -p $D/Sources/CRCExtensions && cp ../patch/gzbench/mu-patch/Sources/CRCExtensions/CRCExtensions.swift $D/Sources/CRCExtensions/
+          git status --short
       - name: seed, and the server
         working-directory: million
         run: |
@@ -48,6 +57,9 @@ jobs:
           bash seed/make-seed.sh > /tmp/seed.log 2>&1
           sudo bash submissions/swift-epoll-akbashev/install.sh > /tmp/install.log 2>&1
           bash submissions/swift-epoll-akbashev/build.sh 2>&1 | tail -1
+      - name: million's tests, with the new gzip
+        working-directory: million
+        run: bash test/run.sh submissions/swift-epoll-akbashev 2>&1 | tail -3
       - name: feeds
         working-directory: million
         run: |
@@ -56,6 +68,12 @@ jobs:
             submissions/swift-epoll-akbashev/.build/release/Feed > /tmp/server.log 2>&1 &
           for _ in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:3000/health && break; sleep 1; done
           python3 ../patch/gzbench/feeds.py /tmp/feeds 300
+          # Through the server: each gzipped feed against the same feed plain (no post in between).
+          ok=0; for k in $(seq 50); do
+            curl -s -H 'Accept-Encoding: gzip' -D /tmp/h -o /tmp/f.gz http://127.0.0.1:3000/feed
+            curl -s -o /tmp/f.json http://127.0.0.1:3000/feed
+            grep -qi '^content-encoding: gzip' /tmp/h && gzip -t /tmp/f.gz && gunzip -c /tmp/f.gz | cmp -s - /tmp/f.json && ok=$((ok + 1))
+          done; echo "gzipped by the server and equal to the plain feed: $ok/50"
           kill %1
       - name: ISA-L 2.31.1, as swift-iouring-Tabonx builds it
         run: |
@@ -68,11 +86,18 @@ jobs:
           export PATH=/opt/swift/usr/bin:$PATH
           CPU=$(clang -march=native -### -c -x c /dev/null 2>&1 | grep -o '"-target-cpu" "[^"]*"' | cut -d'"' -f4)
           echo "target-cpu $CPU"
-          for v in old new; do
+          D=million/submissions/swift-epoll-akbashev
+          for v in old table new; do
             cp -R patch/gzbench/swift /tmp/sbench-$v
             mkdir -p /tmp/sbench-$v/Sources/Gzip
-            if [ $v = old ]; then cp million/submissions/swift-epoll-akbashev/Sources/Gzip/Gzip.swift /tmp/sbench-$v/Sources/Gzip/
-            else cp patch/gzbench/GzipNew.swift /tmp/sbench-$v/Sources/Gzip/Gzip.swift; fi
+            if [ $v = old ]; then cp /tmp/GzipOld.swift /tmp/sbench-$v/Sources/Gzip/Gzip.swift
+            else
+              cp patch/gzbench/swift/Package-new.swift /tmp/sbench-$v/Package.swift
+              cp -R $D/Sources/Syscalls $D/Sources/CRCExtensions /tmp/sbench-$v/Sources/
+              cp $D/Sources/Gzip/Gzip.swift /tmp/sbench-$v/Sources/Gzip/
+            fi
+            # "table": the new one with the CRC kept on the tables.
+            [ $v = table ] && sed -i 's/if Self.hasCarrylessMultiply {/if false {/' /tmp/sbench-$v/Sources/Gzip/Gzip.swift
             (cd /tmp/sbench-$v && swift build -c release -Xswiftc -enforce-exclusivity=unchecked --static-swift-stdlib \
               -Xswiftc -target-cpu -Xswiftc "$CPU" 2>&1 | tail -1)
           done
@@ -82,6 +107,7 @@ jobs:
           for round in 1 2; do
             echo "== round $round"
             taskset -c 1 /tmp/sbench-old/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-old
+            taskset -c 1 /tmp/sbench-table/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-table
             taskset -c 1 /tmp/sbench-new/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-new
             taskset -c 1 /tmp/cbench /tmp/feeds 300 400 /tmp/out
           done

@@ -3,8 +3,9 @@
 // default table, the one its fastest level uses: a dynamic block header that ships with the library, whose code
 // lengths are read out of it once. So a body is compressed in one pass, each literal or match written out as it is
 // found, with no codes to build for it. Matches are found greedily through a hash of the next four bytes, as the
-// fastest levels of zlib, libdeflate and ISA-L find them. The tables live as long as the compressor, so compressing a
-// body allocates nothing.
+// fastest levels of zlib, libdeflate and ISA-L find them. The CRC-32 runs on the CPU's carry-less multiply where it
+// has one (CRCExtensions), and eight bytes per step from tables otherwise. The tables live as long as the compressor,
+// so compressing a body allocates nothing.
 //
 // The block header below is ISA-L 2.31.1's (igzip/hufftables_c.c, hufftables_default for a 32 KB window), under
 // this notice:
@@ -27,6 +28,10 @@
 //   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
 //   WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //   USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#if arch(x86_64)
+import CRCExtensions
+import Syscalls
+#endif
 
 /// A compressor, owned by one thread.
 public struct Gzip: ~Copyable, ~Sendable {
@@ -46,6 +51,8 @@ public struct Gzip: ~Copyable, ~Sendable {
     private let crcTable: UnsafeMutablePointer<UInt32>
     /// `header`, kept here so a body doesn't go through the static array.
     private let headerBytes: UnsafeMutablePointer<UInt8>
+    /// Whether the CRC runs on the carry-less multiply: the CPU has it, and it agreed with the tables at start.
+    private var carryless = false
 
     private static let hashBits = 13
     private static let windowSize = 32768
@@ -108,7 +115,32 @@ public struct Gzip: ~Copyable, ~Sendable {
                 crcTable[k * 256 + n] = c
             }
         }
+        #if arch(x86_64)
+        // Made-up bytes, both ways, at lengths that take every path of the fold.
+        if Self.hasCarrylessMultiply {
+            let sample = (0..<4103).map { UInt8(truncatingIfNeeded: $0 &* 131 &+ $0 >> 5) }
+            var agree = true
+            sample.withUnsafeBufferPointer { p in
+                for n in [64, 80, 128, 1000, 4103] {
+                    let tables = crc32(p.baseAddress!, n)
+                    carryless = true
+                    agree = agree && crc32(p.baseAddress!, n) == tables
+                    carryless = false
+                }
+            }
+            carryless = agree
+        }
+        #endif
     }
+
+    #if arch(x86_64)
+    /// PCLMULQDQ and SSE4.1, usable: CPUID leaf 1's ECX bits 1 and 19, read through glibc (<sys/platform/x86.h>:
+    /// `CPUID_INDEX_1` is 0, and the usable ECX is word 4 + 2).
+    private static var hasCarrylessMultiply: Bool {
+        guard let leaf1 = sys_x86_get_cpuid_feature_leaf(0) else { return false }
+        return leaf1[4 + 2] >> 1 & 1 != 0 && leaf1[4 + 2] >> 19 & 1 != 0
+    }
+    #endif
 
     deinit {
         head.deallocate()
@@ -281,10 +313,17 @@ public struct Gzip: ~Copyable, ~Sendable {
 
     // ---------- CRC-32 ----------
 
-    /// CRC-32 (the gzip polynomial), eight bytes per step.
+    /// CRC-32 (the gzip polynomial): whole 16-byte blocks on the carry-less multiply when it is in use, the rest eight
+    /// bytes per step from the tables.
     private func crc32(_ p: UnsafePointer<UInt8>, _ n: Int) -> UInt32 {
         var c: UInt32 = 0xFFFF_FFFF
         var i = 0
+        #if arch(x86_64)
+        if carryless && n >= 64 {
+            i = n & ~15
+            c = crc32Fold(c, p, count: i)
+        }
+        #endif
         let t = crcTable
         while i + 8 <= n {
             let lo = UnsafeRawPointer(p + i).loadUnaligned(as: UInt32.self).littleEndian ^ c
