@@ -35,8 +35,11 @@ jobs:
           lscpu | grep -E 'Model name|Architecture'
           echo "features: $(grep -o -w -E 'sha_ni|pclmulqdq|avx512f|vpclmulqdq' /proc/cpuinfo | sort -u | xargs)"
       - name: test (debug)
+        timeout-minutes: 15
         run: swift test
       - name: test (release)
+        timeout-minutes: 15
         run: swift test -c release -Xswiftc -enable-testing
       - name: test (portable only, no X86Extensions trait)
+        timeout-minutes: 15
         run: swift test --disable-default-traits

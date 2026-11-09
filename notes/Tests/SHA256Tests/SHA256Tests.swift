@@ -19,6 +19,24 @@ private func hmac(_ key: [UInt8], _ data: [UInt8]) -> String { hex(HMACSHA256(ke
     #expect(sha([UInt8](repeating: 0x61, count: 1_000_000)) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
 }
 
+@Test func hasherMatchesOneShot() {
+    let message = (0..<1000).map { UInt8(truncatingIfNeeded: $0 &* 131 &+ 17) }
+    for n in [0, 1, 55, 56, 63, 64, 65, 200, 1000] {
+        let whole = sha(Array(message.prefix(n)))
+        for piece in [1, 7, 63, 64, 65, 300] {
+            var hasher = SHA256.Hasher()
+            var at = 0
+            while at < n {
+                let part = Array(message[at..<min(at + piece, n)])
+                hasher.update(part.span)
+                at += part.count
+            }
+            let digest = hex(hasher.finalize())
+            #expect(digest == whole, "\(n) bytes in pieces of \(piece)")
+        }
+    }
+}
+
 @Test func rfc4231() {
     #expect(hmac([UInt8](repeating: 0x0B, count: 20), Array("Hi There".utf8))
         == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")

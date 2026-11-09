@@ -46,14 +46,14 @@ actor OnLoop {
     func ping() {}
 }
 
-@Test func actorsRunOnTheLoopsThread() async throws {
+@Test(.timeLimit(.minutes(1))) func actorsRunOnTheLoopsThread() async throws {
     let loop = try EventLoop(name: "test-loop")
     #expect(await OnLoop(loop).onLoopThread())
     #expect(loop.isIsolatingCurrentContext() == false)
     #expect(await Task(executorPreference: loop) { loop.isIsolatingCurrentContext() == true }.value)
 }
 
-@Test func interruptEndsAWaitBeforeOrDuring() async throws {
+@Test(.timeLimit(.minutes(1))) func interruptEndsAWaitBeforeOrDuring() async throws {
     let actor = OnLoop(try EventLoop(name: "test-loop"))
     actor.loop.interrupt()
     await actor.waitForInterrupt()
@@ -63,12 +63,12 @@ actor OnLoop {
     await waited
 }
 
-@Test func waitLastsUntilItsDeadline() async throws {
+@Test(.timeLimit(.minutes(1))) func waitLastsUntilItsDeadline() async throws {
     let actor = OnLoop(try EventLoop(name: "test-loop"))
     #expect(await actor.wait(for: .milliseconds(30)) >= .milliseconds(30))
 }
 
-@Test func registeredDescriptorsWakeTheLoop() async throws {
+@Test(.timeLimit(.minutes(1))) func registeredDescriptorsWakeTheLoop() async throws {
     let actor = OnLoop(try EventLoop(name: "test-loop"))
     var fds: [Int32] = [0, 0]
     #expect(pipe(&fds) == 0)
@@ -79,7 +79,7 @@ actor OnLoop {
     #expect(seen.count == 1 && seen[0].token == 42 && seen[0].events.contains(.readable))
 }
 
-@Test func messagesWakeWaitForEvents() async throws {
+@Test(.timeLimit(.minutes(1))) func messagesWakeWaitForEvents() async throws {
     let actor = OnLoop(try EventLoop(name: "test-loop"))
     async let woke = actor.waitForMessage()
     while !actor.blocking.load(ordering: .acquiring) { try await Task.sleep(for: .milliseconds(1)) }

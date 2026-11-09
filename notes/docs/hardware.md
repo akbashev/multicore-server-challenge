@@ -65,6 +65,6 @@ that formula regenerates every constant, which is how to get the ones for new di
 
 ## What's still out of reach
 
-No inline assembly. bcrypt's key schedule, written out per lane count and interleaved so the compiler only has
-registers to choose, still runs at 25 ms per cost-10 login on x86 against 20 for hand-written assembly: LLVM spills
-registers at four or five lanes.
+No inline assembly. bcrypt's key schedule (the [`Bcrypt`](../Sources/Bcrypt/Bcrypt.swift) module), written out per
+lane count and interleaved so the compiler only has registers to choose, still runs at 25 ms per cost-10 login on
+x86 against 20 for hand-written assembly: LLVM spills registers at four or five lanes.

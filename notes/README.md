@@ -68,7 +68,7 @@ for those workloads and are there as examples, not settings to copy.
 |---|---|
 | `Gzip` | gzip for in-memory bodies at ISA-L level 0's speed: ISA-L's default Huffman table and its level-0 loop, in Swift. Output about 40% larger than zlib's level 1 at about a sixth of its time: right for HTTP responses, not for archives |
 | `CRC32` | CRC-32 as gzip and zlib use it, one-shot or incremental, on PCLMULQDQ or AVX-512 VPCLMULQDQ where the CPU has them (`CRCExtensions`, `CRCExtensions512`) |
-| `SHA256` | SHA-256 and HMAC-SHA256 (pad states precomputed), on SHA-NI where the CPU has it (`SHAExtensions`) |
+| `SHA256` | SHA-256 (one-shot or incremental) and HMAC-SHA256 (pad states precomputed), on SHA-NI where the CPU has it (`SHAExtensions`) |
 | `CPUFeatures` | what the CPU can do, from CPUID through glibc, without reading `/proc` |
 | `Bcrypt` | bcrypt (`$2b$`): one hash, or several in lockstep so their S-box loads overlap; the lane count is calibrated on first use |
 | `EventLoop` | an executor for actors on a thread of its own, sleeping in `epoll_wait`; an actor on it can wait on its sockets in the same call (Linux) |

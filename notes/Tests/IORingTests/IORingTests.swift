@@ -14,7 +14,7 @@ func completions(_ ring: inout IORing, through userData: UInt64) -> [IORing.Comp
     return seen
 }
 
-@Test func nopCompletesWithItsUserData() throws {
+@Test(.timeLimit(.minutes(1))) func nopCompletesWithItsUserData() throws {
     var ring = try IORing(entries: 8)
     ring.prepare(.nop, userData: 7)
     let submitted = ring.submit(waitingFor: 1)
@@ -27,7 +27,7 @@ func completions(_ ring: inout IORing, through userData: UInt64) -> [IORing.Comp
     #expect(none == nil)
 }
 
-@Test func waitTimesOut() throws {
+@Test(.timeLimit(.minutes(1))) func waitTimesOut() throws {
     var ring = try IORing(entries: 4, options: .singleThread)
     let needsEnter = ring.needsEnter
     let waited = ring.submit(waitingFor: 1, timeout: .milliseconds(20))
@@ -35,7 +35,7 @@ func completions(_ ring: inout IORing, through userData: UInt64) -> [IORing.Comp
     #expect(waited == -ETIME)
 }
 
-@Test func linkedWriteThenReadThroughAPipe() throws {
+@Test(.timeLimit(.minutes(1))) func linkedWriteThenReadThroughAPipe() throws {
     var ring = try IORing(entries: 8, options: .singleThread)
     var fds: [Int32] = [0, 0]
     #expect(pipe(&fds) == 0)
@@ -56,7 +56,7 @@ func completions(_ ring: inout IORing, through userData: UInt64) -> [IORing.Comp
     #expect(Array(received.prefix(message.count)) == message)
 }
 
-@Test func acceptReceiveSendAndCloseOverLoopback() throws {
+@Test(.timeLimit(.minutes(1))) func acceptReceiveSendAndCloseOverLoopback() throws {
     var ring = try IORing(entries: 16, options: .singleThread)
     try ring.registerFiles(count: 4)
     let group = try ring.registerBuffers(count: 4, size: 1024)
@@ -76,6 +76,9 @@ func completions(_ ring: inout IORing, through userData: UInt64) -> [IORing.Comp
 
     let client = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
     defer { close(client) }
+    // The client's reads give up after five seconds instead of waiting for an answer that never comes.
+    var patience = timeval(tv_sec: 5, tv_usec: 0)
+    _ = setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &patience, socklen_t(MemoryLayout<timeval>.size))
     let connected = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(client, $0, length) } }
     #expect(connected == 0)
     let accepted = try #require(completions(&ring, through: 1).first { $0.userData == 1 })

@@ -1,4 +1,4 @@
-// SHA-256 (FIPS 180-4) and HMAC-SHA256 (RFC 2104). The compression runs on the CPU's SHA extensions where it has them
+// SHA-256 (FIPS 180-4), one-shot or incremental, and HMAC-SHA256 (RFC 2104). The compression runs on the CPU's SHA extensions where it has them
 // (SHAExtensions: x86 SHA-NI through Swift's `Builtin`), chosen once at start: CPUID says they are usable, and they
 // hash test messages of every padding case as the portable Swift function here does. Everything works on `Span`s and
 // fixed-size `InlineArray`s, so hashing allocates nothing.
@@ -127,6 +127,54 @@ public enum SHA256 {
 
     @inline(__always) static func bytes(_ state: State) -> Digest {
         Digest { i in UInt8(truncatingIfNeeded: state[i >> 2] >> (24 - 8 * UInt32(i & 3))) }
+    }
+}
+
+extension SHA256 {
+    /// SHA-256 of data that arrives in pieces: `update` with each, then `finalize`. Whole blocks are compressed as they
+    /// come; at most 63 bytes wait for the next piece.
+    public struct Hasher: Sendable {
+        private var state = SHA256.initialState
+        /// Bytes compressed into `state` so far: whole blocks.
+        private var compressed: UInt64 = 0
+        private var pending = InlineArray<64, UInt8>(repeating: 0)
+        private var pendingCount = 0
+        /// `SHA256.usesExtensions`, kept here for the hot path.
+        private let extensions = SHA256.usesExtensions
+
+        public init() {}
+
+        public mutating func update(_ data: Span<UInt8>) {
+            var start = 0
+            if pendingCount > 0 {
+                let take = min(64 - pendingCount, data.count)
+                for i in 0..<take { pending[pendingCount + i] = data[i] }
+                pendingCount += take
+                start = take
+                guard pendingCount == 64 else { return }
+                let block = pending
+                SHA256.compress(&state, block.span.bytes, blocks: 1, extensions: extensions)
+                compressed += 64
+                pendingCount = 0
+            }
+            let full = (data.count - start) / 64
+            if full > 0 {
+                SHA256.compress(&state, data.extracting(start..<start + 64 * full).bytes, blocks: full, extensions: extensions)
+                compressed += UInt64(64 * full)
+                start += 64 * full
+            }
+            for i in start..<data.count {
+                pending[pendingCount] = data[i]
+                pendingCount += 1
+            }
+        }
+
+        /// The digest of everything passed to `update`.
+        public consuming func finalize() -> Digest {
+            let rest = pending
+            return SHA256.bytes(SHA256.hash(from: state, priorBytes: compressed, rest.span.extracting(0..<pendingCount),
+                                            extensions: extensions))
+        }
     }
 }
 

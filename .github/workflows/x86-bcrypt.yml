@@ -37,9 +37,12 @@ jobs:
           uname -r; lscpu | grep -E 'Model name'
           echo "features: $(grep -o -w -E 'sha_ni|pclmulqdq|avx512f|vpclmulqdq' /proc/cpuinfo | sort -u | xargs)"
       - name: test (debug)
-        run: swift test 2>&1 | grep -E '✘|passed after|failed|error:|runs on|on extensions|Expectation' | tail -40
+        timeout-minutes: 15
+        run: swift test 2>&1 | grep -E 'started|✘|passed after|failed|error:|runs on|on extensions|Expectation'
       - name: test (release), and which paths ran
+        timeout-minutes: 15
         run: |
-          swift test -c release -Xswiftc -enable-testing 2>&1 | grep -E '✘|passed after|failed|error:|runs on|on extensions|Expectation' | tail -40
+          swift test -c release -Xswiftc -enable-testing 2>&1 | grep -E 'started|✘|passed after|failed|error:|runs on|on extensions|Expectation'
       - name: test (portable only)
-        run: swift test --disable-default-traits 2>&1 | grep -E '✘|passed after|failed|error:|runs on|on extensions|Expectation' | tail -40
+        timeout-minutes: 15
+        run: swift test --disable-default-traits 2>&1 | grep -E 'started|✘|passed after|failed|error:|runs on|on extensions|Expectation'
