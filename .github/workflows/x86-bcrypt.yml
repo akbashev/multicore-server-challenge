@@ -1,7 +1,7 @@
-# Not for upstream: swift-epoll-akbashev-sha (SHA-256 on the x86 SHA extensions) on an x86 runner: whether the CPU
-# has them and the server picks them (its start-up check hashes test messages both ways), and the conformance tests
-# on the 2% seed with them in use.
-name: x86 sha
+# Not for upstream: the Swift 6.4.2 toolchain's size by part, and the lighter install.sh (light/: streamed, no
+# debugger or editor tools) under the real tests of twelve-dollar #361 (3118b07) and million-users #83 (8c1bc86),
+# with the disk used at each step.
+name: x86 swift light
 on:
   workflow_dispatch:
 permissions:
@@ -11,34 +11,94 @@ defaults:
     shell: bash
 
 jobs:
-  sha:
+  sizes:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    steps:
+      - name: the toolchain's size, by part
+        run: |
+          curl -fsSL -o /tmp/swift.tar.gz https://download.swift.org/swift-6.4.2-release/ubuntu2404/swift-6.4.2-RELEASE/swift-6.4.2-RELEASE-ubuntu24.04.tar.gz
+          ls -l /tmp/swift.tar.gz | awk '{printf "tarball: %.0f MB\n", $5 / 1e6}'
+          tar -tvzf /tmp/swift.tar.gz | awk '{size = $3; name = $6; sub(/^[^\/]*\//, "", name); total += size
+            n = split(name, p, "/"); key = p[1] "/" p[2] "/" p[3]; by[key] += size
+            if (name ~ /lldb|python3/) g["lldb + python"] += size
+            else if (name ~ /sourcekit/) g["sourcekit"] += size
+            else if (name ~ /clangd/) g["clangd"] += size
+            else if (name ~ /docc/) g["docc"] += size
+            else if (name ~ /share\/(doc|man)\//) g["share/doc, man"] += size
+            else if (name ~ /swift-format/) g["swift-format"] += size
+            else if (name ~ /swift_static/) g["kept: swift_static"] += size
+            else if (name ~ /lib\/swift\//) g["kept: lib/swift"] += size
+            else if (name ~ /clang|lld/) g["kept: clang, lld"] += size
+            else if (name ~ /swift-frontend/) g["kept: swift-frontend"] += size
+          } END { printf "unpacked: %.0f MB\n", total / 1e6; for (k in g) printf "  %-22s %6.0f MB\n", k, g[k] / 1e6
+            for (k in by) printf "%10.0f MB  %s\n", by[k] / 1e6, k > "/tmp/by" }'
+          echo "largest paths (three levels):"; sort -rn /tmp/by | head -25
+  twelve:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: patch }
+      - uses: actions/checkout@v4
+        with:
+          repository: arjaythedev/twelve-dollar-server-challenge
+          ref: refs/pull/361/head
+          path: td
+      - name: tools, seed
+        working-directory: td
+        run: |
+          git log --oneline -1
+          sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3 jq curl openssl
+          bash seed/make-seed.sh > /tmp/seed.log 2>&1 || { tail -20 /tmp/seed.log; exit 1; }
+      - name: the lighter install
+        working-directory: td
+        run: |
+          cp ../patch/light/install.sh submissions/swift-iouring-akbashev/install.sh
+          echo "disk used before: $(df --output=used -BM / | tail -1)"
+          sudo bash submissions/swift-iouring-akbashev/install.sh > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
+          tail -2 /tmp/install.log
+          echo "disk used after the install: $(df --output=used -BM / | tail -1); /opt/swift: $(sudo du -sm /opt/swift | cut -f1) MB"
+      - name: build and the tests
+        working-directory: td
+        run: |
+          bash test/run.sh submissions/swift-iouring-akbashev 2>&1 | tail -3
+          echo "disk used after build and tests: $(df --output=used -BM / | tail -1); .build: $(du -sm submissions/swift-iouring-akbashev/.build | cut -f1) MB"
+  million:
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:18
         env: { POSTGRES_PASSWORD: postgres }
-        ports: ["5432:5432"]
-        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
     env: { PGHOST: 127.0.0.1, PGPORT: 5432, PGUSER: postgres, PGPASSWORD: postgres }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version-file: bench/go.mod, cache-dependency-path: bench/go.sum }
-      - name: machine
+        with: { path: patch }
+      - uses: actions/checkout@v4
+        with:
+          repository: arjaythedev/million-users-challenge
+          ref: refs/pull/83/head
+          path: mu
+      - name: tools, seed
+        working-directory: mu
         run: |
-          lscpu | grep -E "Model name|^CPU\(s\)"
-          echo "SHA extensions: $(grep -o -m1 -w sha_ni /proc/cpuinfo || echo none)"
-      - name: tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client curl jq
-      - name: seed
-        run: bash seed/make-seed.sh --dev
-      - name: install.sh
-        run: sudo bash submissions/swift-epoll-akbashev-sha/install.sh > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
-      - name: build, start, test
-        run: bash test/run.sh submissions/swift-epoll-akbashev-sha
-      - name: start-up line
+          git log --oneline -1
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client jq curl openssl
+          psql -qX -d postgres -c "ALTER SYSTEM SET max_connections = 600"
+          docker restart "$(docker ps -q --filter ancestor=postgres:18)"
+          until pg_isready -q; do sleep 1; done
+          bash seed/make-seed.sh > /tmp/seed.log 2>&1 || { tail -20 /tmp/seed.log; exit 1; }
+      - name: the lighter install
+        working-directory: mu
         run: |
-          DATABASE_URL=postgres://conduit:conduit@127.0.0.1:5432/conduit_dev JWT_SECRET=x PORT=3999 timeout 10 \
-            submissions/swift-epoll-akbashev-sha/.build/release/Conduit 2>&1 | grep listening || true
-          objdump -d submissions/swift-epoll-akbashev-sha/.build/release/Conduit | grep -c sha256rnds2
+          cp ../patch/light/install.sh submissions/swift-epoll-akbashev/install.sh
+          echo "disk used before: $(df --output=used -BM / | tail -1)"
+          sudo bash submissions/swift-epoll-akbashev/install.sh > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
+          tail -2 /tmp/install.log
+          echo "disk used after the install: $(df --output=used -BM / | tail -1); /opt/swift: $(sudo du -sm /opt/swift | cut -f1) MB"
+      - name: build and the tests
+        working-directory: mu
+        run: |
+          bash test/run.sh submissions/swift-epoll-akbashev 2>&1 | tail -3
+          echo "disk used after build and tests: $(df --output=used -BM / | tail -1); .build: $(du -sm submissions/swift-epoll-akbashev/.build | cut -f1) MB"
