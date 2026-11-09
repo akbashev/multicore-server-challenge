@@ -53,8 +53,9 @@ What makes it safe:
 3. **CPUID, not `/proc/cpuinfo`.** glibc's `__x86_get_cpuid_feature_leaf` (`<sys/platform/x86.h>`) reports a feature
    *usable* (the CPU has it and the kernel enables it), and reads nothing outside the process. See `CPUFeatures`.
 4. **A self-check at start-up** against the portable code, on inputs that take every path, before using it.
-5. **Selector immediates must be constants.** `pclmulqdq`'s selector is an `immarg`: pass it through a
-   `@_transparent` wrapper so it reaches LLVM as a literal.
+5. **Selector immediates must be constants.** `pclmulqdq`'s selector is an `immarg`. Passed through a
+   `@_transparent` wrapper, it becomes a literal only once the optimizer runs: an unoptimized build fails with
+   "immarg operand has non-immediate parameter". Build such modules with `-O` even in debug builds.
 
 Results: SHA-NI took about 1 µs per request off token checks. PCLMULQDQ folding made the gzip CRC about four times
 faster than eight-byte tables, and VPCLMULQDQ widened it to 256 bytes per step on AVX-512 CPUs. The fold follows

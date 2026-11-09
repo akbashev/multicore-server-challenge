@@ -5,10 +5,12 @@ import PackageDescription
 // through Swift's `Builtin` module and are built with those instructions enabled for themselves alone. The flags are
 // picked by the architecture building the package, which is the one running it unless you cross-compile; elsewhere
 // those modules are empty and their callers use portable Swift.
+// They are always optimized (-O, after SwiftPM's -Onone in a debug build): an instruction's selector must reach LLVM
+// as a constant, and only the optimizer folds it into one.
 #if arch(x86_64)
-let shaFlags = ["-enable-builtin-module", "-Xcc", "-msha", "-Xcc", "-mssse3", "-Xcc", "-msse4.1"]
-let crcFlags = ["-enable-builtin-module", "-Xcc", "-mpclmul", "-Xcc", "-msse4.1"]
-let crc512Flags = ["-enable-builtin-module", "-Xcc", "-mavx512f", "-Xcc", "-mvpclmulqdq", "-Xcc", "-mpclmul"]
+let shaFlags = ["-enable-builtin-module", "-Xcc", "-msha", "-Xcc", "-mssse3", "-Xcc", "-msse4.1", "-O"]
+let crcFlags = ["-enable-builtin-module", "-Xcc", "-mpclmul", "-Xcc", "-msse4.1", "-O"]
+let crc512Flags = ["-enable-builtin-module", "-Xcc", "-mavx512f", "-Xcc", "-mvpclmulqdq", "-Xcc", "-mpclmul", "-O"]
 #else
 let shaFlags: [String] = []
 let crcFlags: [String] = []
