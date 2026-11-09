@@ -87,7 +87,7 @@ jobs:
           CPU=$(clang -march=native -### -c -x c /dev/null 2>&1 | grep -o '"-target-cpu" "[^"]*"' | cut -d'"' -f4)
           echo "target-cpu $CPU"
           D=million/submissions/swift-epoll-akbashev
-          for v in old table new; do
+          for v in old step2 new; do
             cp -R patch/gzbench/swift /tmp/sbench-$v
             mkdir -p /tmp/sbench-$v/Sources/Gzip
             if [ $v = old ]; then cp /tmp/GzipOld.swift /tmp/sbench-$v/Sources/Gzip/Gzip.swift
@@ -96,8 +96,8 @@ jobs:
               cp -R $D/Sources/Syscalls $D/Sources/CRCExtensions /tmp/sbench-$v/Sources/
               cp $D/Sources/Gzip/Gzip.swift /tmp/sbench-$v/Sources/Gzip/
             fi
-            # "table": the new one with the CRC kept on the tables.
-            [ $v = table ] && sed -i 's/if Self.hasCarrylessMultiply {/if false {/' /tmp/sbench-$v/Sources/Gzip/Gzip.swift
+            # "step2": the one-pass version before ISA-L's bit writer and 16-bit table.
+            [ $v = step2 ] && cp patch/gzbench/GzipStep2.swift /tmp/sbench-$v/Sources/Gzip/Gzip.swift
             (cd /tmp/sbench-$v && swift build -c release -Xswiftc -enforce-exclusivity=unchecked --static-swift-stdlib \
               -Xswiftc -target-cpu -Xswiftc "$CPU" 2>&1 | tail -1)
           done
@@ -107,7 +107,7 @@ jobs:
           for round in 1 2; do
             echo "== round $round"
             taskset -c 1 /tmp/sbench-old/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-old
-            taskset -c 1 /tmp/sbench-table/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-table
+            taskset -c 1 /tmp/sbench-step2/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-step2
             taskset -c 1 /tmp/sbench-new/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-new
             taskset -c 1 /tmp/cbench /tmp/feeds 300 400 /tmp/out
           done
@@ -117,6 +117,7 @@ jobs:
           set +o pipefail
           demangle() { /opt/swift/usr/bin/swift-demangle --simplified; }
           perf record -q -F 4999 -o /tmp/s.data -- taskset -c 1 /tmp/sbench-new/.build/release/sbench /tmp/feeds 300 300 /tmp/out swift-new > /dev/null 2>&1
-          echo "-- the new one"; perf report -i /tmp/s.data --stdio --no-children --sort symbol 2>/dev/null | grep -v '^#' | grep -v '^$' | head -14 | demangle | cut -c1-150
+          echo "-- the new one"; perf report -i /tmp/s.data --stdio --no-children --sort symbol 2>/dev/null | grep -v '^#' | grep -v '^$' | head -6 | demangle | cut -c1-150
+          echo "-- its hottest instructions"; perf annotate -i /tmp/s.data --stdio 2>/dev/null | grep -E '^ +[0-9]+\.[0-9]+ ' | sort -rn | head -40 | cut -c1-140
           perf record -q -F 4999 -o /tmp/c.data -- taskset -c 1 /tmp/cbench /tmp/feeds 300 300 /tmp/out > /dev/null 2>&1
           echo "-- cbench (all three)"; perf report -i /tmp/c.data --stdio --no-children --sort symbol 2>/dev/null | grep -v '^#' | grep -v '^$' | head -20 | cut -c1-150

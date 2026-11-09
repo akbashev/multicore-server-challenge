@@ -35,12 +35,12 @@ import Syscalls
 
 /// A compressor, owned by one thread.
 public struct Gzip: ~Copyable, ~Sendable {
-    /// The last position each 4-byte hash was seen at, plus `base`: entries below `base` are from an earlier body.
-    private let head: UnsafeMutablePointer<Int32>
-    private var base: Int32 = 1
-    /// The table's codes (bit-reversed, as deflate sends them) and lengths: literals and end of block (0...256).
-    private let literalCode: UnsafeMutablePointer<UInt16>
-    private let literalBits: UnsafeMutablePointer<UInt8>
+    /// The last position each 4-byte hash was seen at, its low 16 bits (ISA-L's level-0 table). An entry may be from
+    /// an earlier body or point at the wrong bytes: a candidate is only taken inside this body, after its bytes match.
+    private let head: UnsafeMutablePointer<UInt16>
+    /// The table's codes (bit-reversed, as deflate sends them) and their lengths in bits 16...23: literals and end of
+    /// block (0...256).
+    private let literalCode: UnsafeMutablePointer<UInt32>
     /// A match length's whole code (3...258): its length symbol's code with the extra bits after it, and their count.
     private let lengthCode: UnsafeMutablePointer<UInt32>
     private let lengthBits: UnsafeMutablePointer<UInt8>
@@ -74,7 +74,6 @@ public struct Gzip: ~Copyable, ~Sendable {
         head = .allocate(capacity: 1 << Self.hashBits)
         head.initialize(repeating: 0, count: 1 << Self.hashBits)
         literalCode = .allocate(capacity: 257)
-        literalBits = .allocate(capacity: 257)
         lengthCode = .allocate(capacity: 259)
         lengthBits = .allocate(capacity: 259)
         distanceCode = .allocate(capacity: 30)
@@ -87,8 +86,7 @@ public struct Gzip: ~Copyable, ~Sendable {
         let literalCodes = Self.canonicalCodes(literalLengths)
         let distanceCodes = Self.canonicalCodes(distanceLengths)
         for s in 0...256 {
-            literalCode[s] = literalCodes[s]
-            literalBits[s] = literalLengths[s]
+            literalCode[s] = UInt32(literalCodes[s]) | UInt32(literalLengths[s]) << 16
         }
         lengthCode.initialize(repeating: 0, count: 259)
         lengthBits.initialize(repeating: 0, count: 259)
@@ -145,7 +143,6 @@ public struct Gzip: ~Copyable, ~Sendable {
     deinit {
         head.deallocate()
         literalCode.deallocate()
-        literalBits.deallocate()
         lengthCode.deallocate()
         lengthBits.deallocate()
         distanceCode.deallocate()
@@ -172,7 +169,7 @@ public struct Gzip: ~Copyable, ~Sendable {
         w.byte(0x03)
         w.copy(headerBytes, bits: Self.headerBits)
         writeBody(src, n, &w)
-        w.put(UInt64(literalCode[256]), Int(literalBits[256]))
+        writeLiteral(256, &w)
         w.alignToByte()
         w.uint32LE(crc32(src, n))
         w.uint32LE(UInt32(truncatingIfNeeded: n))
@@ -185,21 +182,18 @@ public struct Gzip: ~Copyable, ~Sendable {
         UnsafeRawPointer(p + i).loadUnaligned(as: UInt32.self)
     }
 
-    /// Greedy matching: at each position, the last one with the same 4-byte hash, if its bytes match and it is in the
-    /// window, written as a match; else the byte, as a literal.
+    /// Greedy matching, as ISA-L's level 0 does it: at each position, the last one with the same 4-byte hash, if it
+    /// is in this body and the window and its bytes match, written as a match (length and distance in one write), the
+    /// next two positions hashed too; else the byte, as a literal.
     private mutating func writeBody(_ src: UnsafePointer<UInt8>, _ n: Int, _ w: inout BitWriter) {
-        if Int(base) > Int(Int32.max) - n - 1 {
-            head.update(repeating: 0, count: 1 << Self.hashBits)
-            base = 1
-        }
-        let b = Int(base)
         var i = 0
         while i + 4 <= n {
             let v = Self.load32(src, i)
-            let h = Int((v &* 0x9E37_79B1) >> UInt32(32 - Self.hashBits))
-            let candidate = Int(head[h]) - b
-            head[h] = Int32(b + i)
-            if candidate >= 0 && i - candidate <= Self.windowSize && Self.load32(src, candidate) == v {
+            let h = Self.hash(v)
+            let distance = (i &- Int(head[h])) & 0xFFFF
+            head[h] = UInt16(truncatingIfNeeded: i)
+            if distance != 0 && distance <= Self.windowSize && distance <= i && Self.load32(src, i - distance) == v {
+                let candidate = i - distance
                 var length = 4
                 let limit = min(258, n - i)
                 while length + 8 <= limit {
@@ -214,21 +208,34 @@ public struct Gzip: ~Copyable, ~Sendable {
                 if length + 8 > limit {
                     while length < limit && src[i + length] == src[candidate + length] { length += 1 }
                 }
-                w.put(UInt64(lengthCode[length]), Int(lengthBits[length]))
-                let distance = Self.distanceSymbol(i - candidate)
-                let bits = Int(distanceBits[distance.code])
-                w.put(UInt64(distanceCode[distance.code]) | UInt64(distance.extra) << UInt64(bits), bits + distance.extraBits)
+                let d = Self.distanceSymbol(distance)
+                let lengthBitCount = UInt64(lengthBits[length])
+                let distanceBitCount = UInt64(distanceBits[d.code])
+                let code = UInt64(lengthCode[length])
+                    | (UInt64(distanceCode[d.code]) | UInt64(d.extra) &<< distanceBitCount) &<< lengthBitCount
+                w.put(code, Int(lengthBitCount + distanceBitCount) + d.extraBits)
+                for k in 1...2 where i + k + 4 <= n {
+                    head[Self.hash(Self.load32(src, i + k))] = UInt16(truncatingIfNeeded: i + k)
+                }
                 i += length
             } else {
-                w.put(UInt64(literalCode[Int(src[i])]), Int(literalBits[Int(src[i])]))
+                writeLiteral(Int(src[i]), &w)
                 i += 1
             }
         }
         while i < n {
-            w.put(UInt64(literalCode[Int(src[i])]), Int(literalBits[Int(src[i])]))
+            writeLiteral(Int(src[i]), &w)
             i += 1
         }
-        base = Int32(b + n + 1)
+    }
+
+    @inline(__always) private static func hash(_ v: UInt32) -> Int {
+        Int((v &* 0x9E37_79B1) >> UInt32(32 - hashBits))
+    }
+
+    @inline(__always) private func writeLiteral(_ symbol: Int, _ w: inout BitWriter) {
+        let entry = literalCode[symbol]
+        w.put(UInt64(entry & 0xFFFF), Int(entry >> 16))
     }
 
     /// The literal/length code of a match length (3...258), its extra bits and their value.
@@ -342,26 +349,28 @@ public struct Gzip: ~Copyable, ~Sendable {
     }
 }
 
-/// Bits into bytes, least significant first, as deflate packs them.
+/// Bits into bytes, least significant first, as deflate packs them; as ISA-L's `write_bits`, each write stores the
+/// whole 64-bit buffer and moves on by the bytes it filled, with no branch: the output needs 8 bytes of room past it.
 private struct BitWriter {
     let out: UnsafeMutablePointer<UInt8>
     private(set) var offset = 0
     private var bits: UInt64 = 0
+    /// At most 7 between writes.
     private var count = 0
 
     init(_ out: UnsafeMutablePointer<UInt8>) {
         self.out = out
     }
 
+    /// `n` bits of `value`, at most 56.
     @inline(__always) mutating func put(_ value: UInt64, _ n: Int) {
-        bits |= value << UInt64(count)
+        bits |= value &<< UInt64(count)
         count += n
-        if count >= 32 {
-            UnsafeMutableRawPointer(out + offset).storeBytes(of: UInt32(truncatingIfNeeded: bits).littleEndian, as: UInt32.self)
-            offset += 4
-            bits >>= 32
-            count -= 32
-        }
+        UnsafeMutableRawPointer(out + offset).storeBytes(of: bits.littleEndian, as: UInt64.self)
+        let whole = count & ~7
+        offset += whole >> 3
+        bits = bits &>> UInt64(whole)
+        count -= whole
     }
 
     /// The first `bits` bits of `bytes`, at a byte boundary.
@@ -374,13 +383,12 @@ private struct BitWriter {
     }
 
     mutating func alignToByte() {
-        while count > 0 {
+        if count > 0 {
             out[offset] = UInt8(truncatingIfNeeded: bits)
             offset += 1
-            bits >>= 8
-            count = max(count - 8, 0)
         }
         bits = 0
+        count = 0
     }
 
     @inline(__always) mutating func byte(_ b: UInt8) {
