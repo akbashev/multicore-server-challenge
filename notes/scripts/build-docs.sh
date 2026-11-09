@@ -12,7 +12,11 @@ OUT=${1:-.build/site}
 BASE=${HOSTING_BASE_PATH:-swift-underlord}
 MODULES=(SHA256 Gzip CRC32 CPUFeatures Bcrypt EventLoop IORing Buffers JSON HTTP JWT FastCollections)
 NOTES=(measuring stdlib concurrency hardware traps case-gzip)
-if command -v docc > /dev/null; then DOCC=(docc); else DOCC=(xcrun docc); fi
+# DocC: on the PATH, next to the real swift binary (a toolchain linked into /usr/local/bin), or through xcrun on macOS.
+SWIFT_BIN=$(dirname "$(readlink -f "$(command -v swift)")")
+if command -v docc > /dev/null; then DOCC=(docc)
+elif [ -x "$SWIFT_BIN/docc" ]; then DOCC=("$SWIFT_BIN/docc")
+else DOCC=(xcrun docc); fi
 WORK=.build/docs
 rm -rf "$WORK" "$OUT"
 mkdir -p "$WORK"
