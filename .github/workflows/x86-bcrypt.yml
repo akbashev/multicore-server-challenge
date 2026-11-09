@@ -13,6 +13,10 @@ defaults:
 
 jobs:
   gzip:
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
@@ -32,7 +36,9 @@ jobs:
           ref: 68b7dc9ec39bec57bb5c1e8408ba398eab3e56c7
           path: million
       - name: machine
-        run: lscpu | grep -E "Model name|^CPU\(s\)"
+        run: |
+          lscpu | grep -E "Model name|^CPU\(s\)"
+          echo "avx512f: $(grep -c -m1 -w avx512f /proc/cpuinfo), vpclmulqdq: $(grep -c -m1 -w vpclmulqdq /proc/cpuinfo)"
       - name: tools
         run: |
           sudo apt-get update -qq
@@ -46,7 +52,10 @@ jobs:
           cp $D/Sources/Gzip/Gzip.swift /tmp/GzipOld.swift
           cp ../patch/gzbench/mu-patch/Package.swift $D/
           cp ../patch/gzbench/mu-patch/Sources/Gzip/Gzip.swift $D/Sources/Gzip/
-          mkdir -p $D/Sources/CRCExtensions && cp ../patch/gzbench/mu-patch/Sources/CRCExtensions/CRCExtensions.swift $D/Sources/CRCExtensions/
+          mkdir -p $D/Sources/CRCExtensions $D/Sources/CRCExtensions512
+          cp ../patch/gzbench/mu-patch/Sources/CRCExtensions/CRCExtensions.swift $D/Sources/CRCExtensions/
+          cp ../patch/gzbench/mu-patch/Sources/CRCExtensions512/CRCExtensions512.swift $D/Sources/CRCExtensions512/
+          cp ../patch/gzbench/mu-patch/Sources/Feed/Feed.swift $D/Sources/Feed/
           git status --short
       - name: seed, and the server
         working-directory: million
@@ -75,6 +84,7 @@ jobs:
             grep -qi '^content-encoding: gzip' /tmp/h && gzip -t /tmp/f.gz && gunzip -c /tmp/f.gz | cmp -s - /tmp/f.json && ok=$((ok + 1))
           done; echo "gzipped by the server and equal to the plain feed: $ok/50"
           kill %1
+          grep -o 'SHA-256.*' /tmp/server.log || true
       - name: ISA-L 2.31.1, as swift-iouring-Tabonx builds it
         run: |
           curl -fsSL -o /tmp/isa-l.tar.gz https://github.com/intel/isa-l/archive/refs/tags/v2.31.1.tar.gz
@@ -87,17 +97,18 @@ jobs:
           CPU=$(clang -march=native -### -c -x c /dev/null 2>&1 | grep -o '"-target-cpu" "[^"]*"' | cut -d'"' -f4)
           echo "target-cpu $CPU"
           D=million/submissions/swift-epoll-akbashev
-          for v in old step2 new; do
+          for v in old step3 new; do
             cp -R patch/gzbench/swift /tmp/sbench-$v
             mkdir -p /tmp/sbench-$v/Sources/Gzip
             if [ $v = old ]; then cp /tmp/GzipOld.swift /tmp/sbench-$v/Sources/Gzip/Gzip.swift
             else
               cp patch/gzbench/swift/Package-new.swift /tmp/sbench-$v/Package.swift
-              cp -R $D/Sources/Syscalls $D/Sources/CRCExtensions /tmp/sbench-$v/Sources/
+              cp -R $D/Sources/Syscalls $D/Sources/CRCExtensions $D/Sources/CRCExtensions512 /tmp/sbench-$v/Sources/
               cp $D/Sources/Gzip/Gzip.swift /tmp/sbench-$v/Sources/Gzip/
             fi
-            # "step2": the one-pass version before ISA-L's bit writer and 16-bit table.
-            [ $v = step2 ] && cp patch/gzbench/GzipStep2.swift /tmp/sbench-$v/Sources/Gzip/Gzip.swift
+            # "step3": one position per step, and its 4-lane CRC.
+            if [ $v = step3 ]; then cp patch/gzbench/step3/Gzip.swift /tmp/sbench-$v/Sources/Gzip/Gzip.swift
+              cp patch/gzbench/step3/CRCExtensions.swift /tmp/sbench-$v/Sources/CRCExtensions/; fi
             (cd /tmp/sbench-$v && swift build -c release -Xswiftc -enforce-exclusivity=unchecked --static-swift-stdlib \
               -Xswiftc -target-cpu -Xswiftc "$CPU" 2>&1 | tail -1)
           done
@@ -107,11 +118,18 @@ jobs:
           for round in 1 2; do
             echo "== round $round"
             taskset -c 1 /tmp/sbench-old/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-old
-            taskset -c 1 /tmp/sbench-step2/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-step2
+            taskset -c 1 /tmp/sbench-step3/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-step3
             taskset -c 1 /tmp/sbench-new/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-new
             taskset -c 1 /tmp/cbench /tmp/feeds 300 400 /tmp/out
           done
           python3 patch/gzbench/verify.py /tmp/feeds /tmp/out 300
+      - name: the CRC folds
+        run: |
+          export PATH=/opt/swift/usr/bin:$PATH
+          cp -R patch/gzbench/crccheck /tmp/crccheck
+          cp -R million/submissions/swift-epoll-akbashev/Sources/CRCExtensions million/submissions/swift-epoll-akbashev/Sources/CRCExtensions512 /tmp/crccheck/Sources/
+          (cd /tmp/crccheck && swift build -c release 2>&1 | tail -1)
+          taskset -c 1 /tmp/crccheck/.build/release/crccheck $(grep -q -w vpclmulqdq /proc/cpuinfo && grep -q -w avx512f /proc/cpuinfo && echo 1 || echo 0)
       - name: perf, the new one and ISA-L
         run: |
           set +o pipefail

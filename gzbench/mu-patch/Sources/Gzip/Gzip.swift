@@ -3,8 +3,9 @@
 // default table, the one its fastest level uses: a dynamic block header that ships with the library, whose code
 // lengths are read out of it once. So a body is compressed in one pass, each literal or match written out as it is
 // found, with no codes to build for it. Matches are found greedily through a hash of the next four bytes, as the
-// fastest levels of zlib, libdeflate and ISA-L find them. The CRC-32 runs on the CPU's carry-less multiply where it
-// has one (CRCExtensions), and eight bytes per step from tables otherwise. The tables live as long as the compressor,
+// fastest levels of zlib, libdeflate and ISA-L find them. The CRC-32 runs on AVX-512's carry-less multiply where the
+// CPU has it (CRCExtensions512), on the 128-bit one where it has that (CRCExtensions), and eight bytes per step from
+// tables otherwise. The tables live as long as the compressor,
 // so compressing a body allocates nothing.
 //
 // The block header below is ISA-L 2.31.1's (igzip/hufftables_c.c, hufftables_default for a 32 KB window), under
@@ -30,6 +31,7 @@
 //   USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #if arch(x86_64)
 import CRCExtensions
+import CRCExtensions512
 import Syscalls
 #endif
 
@@ -51,8 +53,21 @@ public struct Gzip: ~Copyable, ~Sendable {
     private let crcTable: UnsafeMutablePointer<UInt32>
     /// `header`, kept here so a body doesn't go through the static array.
     private let headerBytes: UnsafeMutablePointer<UInt8>
-    /// Whether the CRC runs on the carry-less multiply: the CPU has it, and it agreed with the tables at start.
-    private var carryless = false
+    /// What the CRC runs on: the widest carry-less multiply the CPU has that agreed with the tables at start.
+    private var crcPath = CRCPath.tables
+
+    private enum CRCPath {
+        case tables, carryless, carryless512
+    }
+
+    /// The instructions the CRC runs on, for the start-up line.
+    public var crcInstructions: String {
+        switch crcPath {
+        case .tables: "tables"
+        case .carryless: "PCLMULQDQ"
+        case .carryless512: "VPCLMULQDQ"
+        }
+    }
 
     private static let hashBits = 13
     private static let windowSize = 32768
@@ -114,29 +129,35 @@ public struct Gzip: ~Copyable, ~Sendable {
             }
         }
         #if arch(x86_64)
-        // Made-up bytes, both ways, at lengths that take every path of the fold.
-        if Self.hasCarrylessMultiply {
-            let sample = (0..<4103).map { UInt8(truncatingIfNeeded: $0 &* 131 &+ $0 >> 5) }
+        // Each path the CPU has, on made-up bytes at lengths that take every part of its fold, against the tables.
+        let sample = (0..<4103).map { UInt8(truncatingIfNeeded: $0 &* 131 &+ $0 >> 5) }
+        let (carryless, wide) = Self.carrylessMultiply
+        for (path, usable) in [(CRCPath.carryless, carryless), (CRCPath.carryless512, wide)] where usable {
             var agree = true
             sample.withUnsafeBufferPointer { p in
-                for n in [64, 80, 128, 1000, 4103] {
+                for n in [128, 144, 256, 272, 1000, 4103] {
+                    crcPath = .tables
                     let tables = crc32(p.baseAddress!, n)
-                    carryless = true
+                    crcPath = path
                     agree = agree && crc32(p.baseAddress!, n) == tables
-                    carryless = false
                 }
             }
-            carryless = agree
+            crcPath = agree ? path : .tables
+            if !agree { break }
         }
         #endif
     }
 
     #if arch(x86_64)
-    /// PCLMULQDQ and SSE4.1, usable: CPUID leaf 1's ECX bits 1 and 19, read through glibc (<sys/platform/x86.h>:
-    /// `CPUID_INDEX_1` is 0, and the usable ECX is word 4 + 2).
-    private static var hasCarrylessMultiply: Bool {
-        guard let leaf1 = sys_x86_get_cpuid_feature_leaf(0) else { return false }
-        return leaf1[4 + 2] >> 1 & 1 != 0 && leaf1[4 + 2] >> 19 & 1 != 0
+    /// Whether the CPU has, usable, PCLMULQDQ and SSE4.1 (CPUID leaf 1, ECX bits 1 and 19), and on top of them AVX-512F
+    /// and VPCLMULQDQ (leaf 7, EBX bit 16 and ECX bit 10): read through glibc (<sys/platform/x86.h>, where
+    /// `CPUID_INDEX_1` is 0 and `CPUID_INDEX_7` 1, and the usable registers are words 4...7).
+    private static var carrylessMultiply: (Bool, Bool) {
+        guard let leaf1 = sys_x86_get_cpuid_feature_leaf(0), let leaf7 = sys_x86_get_cpuid_feature_leaf(1) else {
+            return (false, false)
+        }
+        let narrow = leaf1[4 + 2] >> 1 & 1 != 0 && leaf1[4 + 2] >> 19 & 1 != 0
+        return (narrow, narrow && leaf7[4 + 1] >> 16 & 1 != 0 && leaf7[4 + 2] >> 10 & 1 != 0)
     }
     #endif
 
@@ -182,41 +203,62 @@ public struct Gzip: ~Copyable, ~Sendable {
         UnsafeRawPointer(p + i).loadUnaligned(as: UInt32.self)
     }
 
-    /// Greedy matching, as ISA-L's level 0 does it: at each position, the last one with the same 4-byte hash, if it
-    /// is in this body and the window and its bytes match, written as a match (length and distance in one write), the
-    /// next two positions hashed too; else the byte, as a literal.
+    /// Greedy matching, as ISA-L's level-0 loop (isal_deflate_body) does it: two positions per step, both hashed and
+    /// looked up, 8 bytes at each compared with their candidate's at once; a match at the first is written alone, a
+    /// match at the second after the first's literal in the same write, and otherwise both literals in one write. A
+    /// candidate is only taken inside this body. After a match the two positions after the step's are hashed too.
+    /// With ISA-L's table a literal and a match take at most 11 + 20 + 19 bits, so one write never passes 57.
     private mutating func writeBody(_ src: UnsafePointer<UInt8>, _ n: Int, _ w: inout BitWriter) {
         var i = 0
+        // A step reads 8 bytes at i + 1.
+        while i + 9 <= n {
+            let here = Self.load64(src, i)
+            let next = Self.load64(src, i + 1)
+            let h0 = Self.hash(UInt32(truncatingIfNeeded: here))
+            let h1 = Self.hash(UInt32(truncatingIfNeeded: next))
+            let d0 = (i &- Int(head[h0])) & 0xFFFF
+            head[h0] = UInt16(truncatingIfNeeded: i)
+            let d1 = (i + 1 &- Int(head[h1])) & 0xFFFF
+            head[h1] = UInt16(truncatingIfNeeded: i + 1)
+            if Self.inBody(d0, i) {
+                let x = here ^ Self.load64(src, i - d0)
+                if x & 0xFFFF_FFFF == 0 {
+                    let length = x == 0 ? Self.longMatch(src, i, i - d0, n) : x.trailingZeroBitCount >> 3
+                    let (code, bits) = matchCode(length, d0)
+                    w.put(code, bits)
+                    hashAfterMatch(src, i, n)
+                    i += length
+                    continue
+                }
+            }
+            if Self.inBody(d1, i + 1) {
+                let x = next ^ Self.load64(src, i + 1 - d1)
+                if x & 0xFFFF_FFFF == 0 {
+                    let length = x == 0 ? Self.longMatch(src, i + 1, i + 1 - d1, n) : x.trailingZeroBitCount >> 3
+                    let literal = literalCode[Int(truncatingIfNeeded: here & 0xFF)]
+                    let (code, bits) = matchCode(length, d1)
+                    w.put(UInt64(literal & 0xFFFF) | code &<< UInt64(literal >> 16), Int(literal >> 16) + bits)
+                    hashAfterMatch(src, i, n)
+                    i += 1 + length
+                    continue
+                }
+            }
+            let first = literalCode[Int(truncatingIfNeeded: here & 0xFF)]
+            let second = literalCode[Int(truncatingIfNeeded: here >> 8 & 0xFF)]
+            w.put(UInt64(first & 0xFFFF) | UInt64(second & 0xFFFF) &<< UInt64(first >> 16), Int(first >> 16 + second >> 16))
+            i += 2
+        }
+        // The last few bytes, one position at a time.
         while i + 4 <= n {
             let v = Self.load32(src, i)
             let h = Self.hash(v)
             let distance = (i &- Int(head[h])) & 0xFFFF
             head[h] = UInt16(truncatingIfNeeded: i)
-            if distance != 0 && distance <= Self.windowSize && distance <= i && Self.load32(src, i - distance) == v {
-                let candidate = i - distance
+            if Self.inBody(distance, i) && Self.load32(src, i - distance) == v {
                 var length = 4
-                let limit = min(258, n - i)
-                while length + 8 <= limit {
-                    let x = UnsafeRawPointer(src + i + length).loadUnaligned(as: UInt64.self)
-                        ^ UnsafeRawPointer(src + candidate + length).loadUnaligned(as: UInt64.self)
-                    if x != 0 {
-                        length += x.trailingZeroBitCount >> 3
-                        break
-                    }
-                    length += 8
-                }
-                if length + 8 > limit {
-                    while length < limit && src[i + length] == src[candidate + length] { length += 1 }
-                }
-                let d = Self.distanceSymbol(distance)
-                let lengthBitCount = UInt64(lengthBits[length])
-                let distanceBitCount = UInt64(distanceBits[d.code])
-                let code = UInt64(lengthCode[length])
-                    | (UInt64(distanceCode[d.code]) | UInt64(d.extra) &<< distanceBitCount) &<< lengthBitCount
-                w.put(code, Int(lengthBitCount + distanceBitCount) + d.extraBits)
-                for k in 1...2 where i + k + 4 <= n {
-                    head[Self.hash(Self.load32(src, i + k))] = UInt16(truncatingIfNeeded: i + k)
-                }
+                while i + length < n && src[i + length] == src[i - distance + length] && length < 258 { length += 1 }
+                let (code, bits) = matchCode(length, distance)
+                w.put(code, bits)
                 i += length
             } else {
                 writeLiteral(Int(src[i]), &w)
@@ -226,6 +268,45 @@ public struct Gzip: ~Copyable, ~Sendable {
         while i < n {
             writeLiteral(Int(src[i]), &w)
             i += 1
+        }
+    }
+
+    /// Whether a candidate `distance` back from `position` is in the window and in this body.
+    @inline(__always) private static func inBody(_ distance: Int, _ position: Int) -> Bool {
+        distance != 0 && distance <= windowSize && distance <= position
+    }
+
+    @inline(__always) private static func load64(_ p: UnsafePointer<UInt8>, _ i: Int) -> UInt64 {
+        UnsafeRawPointer(p + i).loadUnaligned(as: UInt64.self)
+    }
+
+    /// The length of a match whose first 8 bytes agree (at most 258, and what is left of the body).
+    @inline(__always) private static func longMatch(_ src: UnsafePointer<UInt8>, _ at: Int, _ candidate: Int, _ n: Int) -> Int {
+        let limit = min(258, n - at)
+        var length = 8
+        while length + 8 <= limit {
+            let x = load64(src, at + length) ^ load64(src, candidate + length)
+            if x != 0 { return length + x.trailingZeroBitCount >> 3 }
+            length += 8
+        }
+        while length < limit && src[at + length] == src[candidate + length] { length += 1 }
+        return length
+    }
+
+    /// A match's length and distance codes, joined, and their bit count.
+    @inline(__always) private func matchCode(_ length: Int, _ distance: Int) -> (UInt64, Int) {
+        let d = Self.distanceSymbol(distance)
+        let lengthBitCount = UInt64(lengthBits[length])
+        let distanceBitCount = UInt64(distanceBits[d.code])
+        let code = UInt64(lengthCode[length])
+            | (UInt64(distanceCode[d.code]) | UInt64(d.extra) &<< distanceBitCount) &<< lengthBitCount
+        return (code, Int(lengthBitCount + distanceBitCount) + d.extraBits)
+    }
+
+    /// The two positions after a step that found a match at `step` or `step + 1`, hashed (ISA-L's limited update).
+    @inline(__always) private func hashAfterMatch(_ src: UnsafePointer<UInt8>, _ step: Int, _ n: Int) {
+        for k in (step + 2)...(step + 3) where k + 4 <= n {
+            head[Self.hash(Self.load32(src, k))] = UInt16(truncatingIfNeeded: k)
         }
     }
 
@@ -326,7 +407,10 @@ public struct Gzip: ~Copyable, ~Sendable {
         var c: UInt32 = 0xFFFF_FFFF
         var i = 0
         #if arch(x86_64)
-        if carryless && n >= 64 {
+        if crcPath == .carryless512 && n >= 256 {
+            i = n & ~15
+            c = crc32Fold512(c, p, count: i)
+        } else if crcPath != .tables && n >= 128 {
             i = n & ~15
             c = crc32Fold(c, p, count: i)
         }
