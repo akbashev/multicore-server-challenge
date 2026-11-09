@@ -47,8 +47,10 @@ mkdir -m 700 "$GNUPGHOME"
 # key file (which a CDN sometimes answers with a page instead, from CI machines).
 for try in 1 2 3; do
   gpg --batch --quiet --keyserver hkps://keyserver.ubuntu.com --recv-keys "$SWIFT_SIGNING_KEY" 2> /dev/null && break
-  curl -fsSL https://www.swift.org/keys/all-keys.asc -o "$WORK/keys.asc" && gpg --batch --quiet --import "$WORK/keys.asc" 2> /dev/null \
-    && gpg --batch --list-keys "$SWIFT_SIGNING_KEY" > /dev/null 2>&1 && break
+  # (gpg's import fails as a whole when one old key in the file can't be taken, so what counts is the key being there.)
+  curl -fsSL https://www.swift.org/keys/all-keys.asc -o "$WORK/keys.asc" \
+    && { gpg --batch --quiet --import "$WORK/keys.asc" 2> /dev/null; gpg --batch --list-keys "$SWIFT_SIGNING_KEY" > /dev/null 2>&1; } \
+    && break
   sleep $((5 * try))
 done
 gpg --batch --list-keys "$SWIFT_SIGNING_KEY" > /dev/null 2>&1 || { echo "install-swift: no Swift signing key" >&2; exit 1; }

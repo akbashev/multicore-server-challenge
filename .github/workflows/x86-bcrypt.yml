@@ -54,6 +54,10 @@ jobs:
       - name: Swift 6.4.2 with DocC, through the install script
         run: sudo SWIFT_VERSION=6.4.2 SWIFT_FULL=1 bash scripts/install-swift.sh
       - name: the site
-        run: bash scripts/build-docs.sh .build/site 2>&1 | tail -20; ls .build/site/documentation
+        run: |
+          bash scripts/build-docs.sh .build/site 2>&1 | tail -20
+          ls .build/site/documentation
+          # DocC's file names have colons, which artifacts don't take: the site goes up as a tarball (Pages takes one too).
+          tar -C .build -czf site.tar.gz site
       - uses: actions/upload-artifact@v4
-        with: { name: site, path: notes/.build/site, retention-days: 7 }
+        with: { name: site, path: notes/site.tar.gz, retention-days: 7 }
