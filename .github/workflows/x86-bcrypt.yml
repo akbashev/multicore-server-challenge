@@ -1,7 +1,7 @@
-# Not for upstream: swift-epoll-akbashev-sha (SHA-256 on the x86 SHA extensions) on an x86 runner: whether the CPU
-# has them and the server picks them (its start-up check hashes test messages both ways), and the conformance tests
-# on the 2% seed with them in use.
-name: x86 sha
+# Not for upstream: million's gzip (swift-epoll-akbashev at 68b7dc9, Sources/Gzip) against ISA-L 2.31.1 at level 0 (as
+# swift-iouring-Tabonx calls it), libdeflate level 1 and zlib level 1, on feeds the server sends under the load
+# generator's kind of posts; time per feed on one pinned CPU, sizes, a check that each output decompresses, and perf.
+name: x86 gzip
 on:
   workflow_dispatch:
 permissions:
@@ -11,34 +11,78 @@ defaults:
     shell: bash
 
 jobs:
-  sha:
+  gzip:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:
         image: postgres:18
         env: { POSTGRES_PASSWORD: postgres }
-        ports: ["5432:5432"]
-        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
-    env: { PGHOST: 127.0.0.1, PGPORT: 5432, PGUSER: postgres, PGPASSWORD: postgres }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env: { PGHOST: 127.0.0.1, PGPORT: 5432, PGUSER: postgres, PGPASSWORD: postgres, JWT_SECRET: million-users-challenge }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version-file: bench/go.mod, cache-dependency-path: bench/go.sum }
+        with: { path: patch }
+      - uses: actions/checkout@v4
+        with:
+          repository: akbashev/million-users-challenge
+          ref: 68b7dc9
+          path: million
       - name: machine
-        run: |
-          lscpu | grep -E "Model name|^CPU\(s\)"
-          echo "SHA extensions: $(grep -o -m1 -w sha_ni /proc/cpuinfo || echo none)"
+        run: lscpu | grep -E "Model name|^CPU\(s\)"
       - name: tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client curl jq
-      - name: seed
-        run: bash seed/make-seed.sh --dev
-      - name: install.sh
-        run: sudo bash submissions/swift-epoll-akbashev-sha/install.sh > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
-      - name: build, start, test
-        run: bash test/run.sh submissions/swift-epoll-akbashev-sha
-      - name: start-up line
         run: |
-          DATABASE_URL=postgres://conduit:conduit@127.0.0.1:5432/conduit_dev JWT_SECRET=x PORT=3999 timeout 10 \
-            submissions/swift-epoll-akbashev-sha/.build/release/Conduit 2>&1 | grep listening || true
-          objdump -d submissions/swift-epoll-akbashev-sha/.build/release/Conduit | grep -c sha256rnds2
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client jq curl openssl nasm libdeflate-dev zlib1g-dev
+          sudo apt-get install -y -qq linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y -qq linux-tools-generic
+          sudo sysctl -q kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+      - name: seed, and the server
+        working-directory: million
+        run: |
+          psql -qX -d postgres -c "ALTER SYSTEM SET max_connections = 600"
+          docker restart "$(docker ps -q --filter ancestor=postgres:18)"
+          until pg_isready -q; do sleep 1; done
+          bash seed/make-seed.sh > /tmp/seed.log 2>&1
+          sudo bash submissions/swift-epoll-akbashev/install.sh > /tmp/install.log 2>&1
+          bash submissions/swift-epoll-akbashev/build.sh 2>&1 | tail -1
+      - name: feeds
+        working-directory: million
+        run: |
+          psql -qX -d postgres -c "CREATE DATABASE feed_test TEMPLATE feed_seed"
+          DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/feed_test HOST=127.0.0.1 PORT=3000 EXTRA_PORT=3001 \
+            submissions/swift-epoll-akbashev/.build/release/Feed > /tmp/server.log 2>&1 &
+          for _ in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:3000/health && break; sleep 1; done
+          python3 ../patch/gzbench/feeds.py /tmp/feeds 300
+          kill %1
+      - name: ISA-L 2.31.1, as swift-iouring-Tabonx builds it
+        run: |
+          curl -fsSL -o /tmp/isa-l.tar.gz https://github.com/intel/isa-l/archive/refs/tags/v2.31.1.tar.gz
+          echo "e1d5573a4019738243b568ab1e1422e6ab7557c5cae33cc8686944d327ad6bb4  /tmp/isa-l.tar.gz" | sha256sum -c -
+          tar xzf /tmp/isa-l.tar.gz -C /tmp && make -s -C /tmp/isa-l-2.31.1 -f Makefile.unx -j"$(nproc)" lib > /dev/null
+          gcc -O2 -I/tmp/isa-l-2.31.1/include -o /tmp/cbench patch/gzbench/cbench.c /tmp/isa-l-2.31.1/bin/isa-l.a -ldeflate -lz
+      - name: ours, with million's flags
+        run: |
+          export PATH=/opt/swift/usr/bin:$PATH
+          cp -R million/submissions/swift-epoll-akbashev/Sources/Gzip patch/gzbench/swift/Sources/Gzip
+          CPU=$(clang -march=native -### -c -x c /dev/null 2>&1 | grep -o '"-target-cpu" "[^"]*"' | cut -d'"' -f4)
+          echo "target-cpu $CPU"
+          cd patch/gzbench/swift && swift build -c release -Xswiftc -enforce-exclusivity=unchecked --static-swift-stdlib \
+            -Xswiftc -target-cpu -Xswiftc "$CPU" 2>&1 | tail -1
+      - name: time per feed (one pinned CPU), sizes, check
+        run: |
+          mkdir -p /tmp/out
+          for round in 1 2; do
+            echo "== round $round"
+            taskset -c 1 patch/gzbench/swift/.build/release/sbench /tmp/feeds 300 400 /tmp/out
+            taskset -c 1 /tmp/cbench /tmp/feeds 300 400 /tmp/out
+          done
+          python3 patch/gzbench/verify.py /tmp/feeds /tmp/out 300
+      - name: perf, ours and ISA-L
+        run: |
+          demangle() { /opt/swift/usr/bin/swift-demangle --simplified; }
+          perf record -q -F 4999 -o /tmp/s.data -- taskset -c 1 patch/gzbench/swift/.build/release/sbench /tmp/feeds 300 300 /tmp/out > /dev/null 2>&1
+          echo "-- ours"; perf report -i /tmp/s.data --stdio --no-children --sort symbol 2>/dev/null | grep -v '^#' | grep -v '^$' | head -14 | demangle | cut -c1-150
+          perf record -q -F 4999 -o /tmp/c.data -- taskset -c 1 /tmp/cbench /tmp/feeds 300 300 /tmp/out > /dev/null 2>&1
+          echo "-- cbench (all three)"; perf report -i /tmp/c.data --stdio --no-children --sort symbol 2>/dev/null | grep -v '^#' | grep -v '^$' | head -20 | cut -c1-150
