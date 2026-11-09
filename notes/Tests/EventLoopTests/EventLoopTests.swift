@@ -43,7 +43,13 @@ actor OnLoop {
         return loop.waitForEvents(&events)
     }
 
-    func ping() {}
+    /// A message for the loop. It touches the actor's state: a call to an empty actor method is inlined in a release
+    /// build, and the hops to the actor and back go with it, so no job would reach the loop.
+    private var pings = 0
+    func ping() -> Int {
+        pings += 1
+        return pings
+    }
 }
 
 @Test(.timeLimit(.minutes(1))) func actorsRunOnTheLoopsThread() async throws {
@@ -83,7 +89,7 @@ actor OnLoop {
     let actor = OnLoop(try EventLoop(name: "test-loop"))
     async let woke = actor.waitForMessage()
     while !actor.blocking.load(ordering: .acquiring) { try await Task.sleep(for: .milliseconds(1)) }
-    await actor.ping()
+    _ = await actor.ping()
     let (count, jobsWaiting) = await woke
     #expect(count == 0 && jobsWaiting)
 }

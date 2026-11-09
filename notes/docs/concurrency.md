@@ -61,3 +61,18 @@ own. Making each reactor turn last at least 2 ms, so a turn's work travels in on
 
 For a single-threaded server, default MainActor isolation lets the compiler prove nothing runs elsewhere, with a
 synchronous loop and no executors, no `async`, and no `Task`.
+
+## A nonisolated async function leaves the actor
+
+Without the `NonisolatedNonsendingByDefault` feature, a plain `nonisolated async` function runs on the global
+executor, not its caller's. An executor's `wait(until:)` written that way registered its deadline from a pool thread,
+just after the executor's own thread had looked for one and gone to sleep with no timeout: a lost wake-up, which hung
+one test in ten in debug builds and nearly every run in release. Mark such functions `nonisolated(nonsending)` (or
+turn the feature on), and still let a wait registered from another thread wake the loop.
+
+## Task.immediate
+
+`Task.immediate` starts the task on the current thread only when its operation is nonisolated (or isolated to the
+current actor); an operation isolated to another actor is enqueued like any `Task`. So it can't start work on another
+actor's thread, and from a synchronous main-actor loop, a closure that inherits the main actor and awaits never
+resumes: the main actor's queue is never drained.

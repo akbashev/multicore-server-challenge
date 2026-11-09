@@ -58,3 +58,21 @@ the CRC. Porting the C reference got within 1.45×; porting what the assembly do
 
 Optimizations here touched sorting, hashing and JSON escaping, so the last check was byte-for-byte: hundreds of
 responses from the old and new builds on copies of the same database, compared exactly.
+
+## Loopback hides part of the cost
+
+On a runner, client and server share the kernel: the receiving side of each packet is processed on the sender's CPU,
+and kernel work was about 75% of the server's samples. Percentages then shrink real differences (a 1 µs gap in user
+space read as "3–8%"). Compare absolute time per request, per function, for each build, and count packets per
+request by direction (iptables counters on the port) before blaming the network.
+
+## Tails show only at saturation
+
+A checkpoint that holds writes for up to a second didn't show at 60–80% CPU on a runner's fast disk. At 100% it set
+p99: 456 ms with a 1 s cap on the hold, 251 ms with 250 ms. Run the comparison at the load where the real test fails.
+
+## Read the other implementation first
+
+When another implementation is faster, read all of it, build scripts included, before profiling. Here the profiles
+pointed at "user space, spread thin"; the source showed the differences directly: how the C library was compiled, a
+commit from the wrong connection, a per-entry loop the other side did a page at a time.

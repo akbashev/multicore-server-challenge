@@ -36,15 +36,15 @@ jobs:
         run: |
           uname -r; lscpu | grep -E 'Model name'
           echo "features: $(grep -o -w -E 'sha_ni|pclmulqdq|avx512f|vpclmulqdq' /proc/cpuinfo | sort -u | xargs)"
-      - name: release, one target at a time (each under 120 s)
-        timeout-minutes: 20
-        run: |
-          set +e
-          swift build -c release -Xswiftc -enable-testing --build-tests 2>&1 | grep -E 'error|Build' | tail -2
-          for t in SHA256Tests CRC32Tests GzipTests BcryptTests IORingTests EventLoopTests; do
-            timeout 120 swift test -c release -Xswiftc -enable-testing --skip-build --filter "$t" > /tmp/out.txt 2>&1
-            echo "TARGET $t: exit $? ($(grep -o 'Test run with [0-9]* tests' /tmp/out.txt | head -1))"
-          done
+      - name: test (debug)
+        timeout-minutes: 15
+        run: swift test 2>&1 | grep --line-buffered -E 'Test run with|✘|error:|Expectation|recorded|runs on|on extensions'
+      - name: test (release)
+        timeout-minutes: 15
+        run: swift test -c release -Xswiftc -enable-testing 2>&1 | grep --line-buffered -E 'Test run with|✘|error:|Expectation|recorded|runs on|on extensions'
+      - name: test (portable only)
+        timeout-minutes: 15
+        run: swift test --disable-default-traits 2>&1 | grep --line-buffered -E 'Test run with|✘|error:|Expectation|recorded'
       - name: each EventLoop test alone in release, ten times
         timeout-minutes: 25
         run: |

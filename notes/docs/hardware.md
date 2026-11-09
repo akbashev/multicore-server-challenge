@@ -68,3 +68,44 @@ that formula regenerates every constant, which is how to get the ones for new di
 No inline assembly. bcrypt's key schedule (the [`Bcrypt`](../Sources/Bcrypt/Bcrypt.swift) module), written out per
 lane count and interleaved so the compiler only has registers to choose, still runs at 25 ms per cost-10 login on
 x86 against 20 for hand-written assembly: LLVM spills registers at four or five lanes.
+
+## Link-time optimization across Swift and C
+
+A Swift module calling into a C target can't inline it: they are compiled apart. SwiftPM can optimize them together:
+
+```sh
+swift build -c release --build-system native --experimental-lto-mode=full \
+  -Xswiftc -use-ld=lld -Xlinker --lto-O3 --static-swift-stdlib
+```
+
+The native build system is needed (the newer one expects object files where LTO writes bitcode), and so is the
+toolchain's `lld`. Plain `-Xswiftc -lto=llvm-full` breaks both build systems the same way. With it, calls from the
+Swift B-tree reader into SQLite's small functions (`PayloadSize`, `PayloadFetch`, `Eof`) went from 13, 13 and 2 call
+sites to none. Compiling SQLite inside one C file with its internals `static`, as C projects do, gained nothing
+measurable without LTO, and nothing reliable with it.
+
+## Reading C structs from Swift: a borrowed view
+
+Where C exposes no function for a field, read it through a view whose lifetime the compiler ties to the owner:
+
+```swift
+struct Page: ~Escapable {
+    let fields: RawSpan          // the C struct, its size in bytes
+    let bytes: Span<UInt8>       // the memory it describes
+    var cellCount: Int { Int(fields.unsafeLoadUnaligned(fromByteOffset: Layout.pageCellCount, as: UInt16.self)) }
+}
+
+var page: Page {                 // on the cursor that owns it
+    @_lifetime(borrow self) borrowing get { _overrideLifetime(Page(...), borrowing: self) }
+}
+```
+
+The offsets are the pinned C version's; check them at startup against what the C library itself returns (where a
+cell is, a count taken both ways) and fall back if they don't match. Span's bounds checks are preconditions, which
+`-Ounchecked` removes: the disassembly of the hot loop had no trap instruction left.
+
+## SQLite drops a connection's cache when another one commits
+
+At the start of each transaction, a WAL connection that sees a commit from another connection empties its whole page
+cache. A checkpointer on its own connection that commits (to start the WAL over, say) costs the main connection its
+cache every time. Let the checkpointer only copy, and let the main connection's own next write start the WAL over.

@@ -53,9 +53,22 @@ runners as well as locally, and the [docs](docs) have the numbers.
 12. **Build for the machine:** `-target-cpu` from `clang -march=native -###`, and `--static-swift-stdlib` for direct
     calls into the runtime. [traps](docs/traps.md)
 
+**From a server on one CPU**
+
+13. **Link Swift and C together.** SwiftPM's full LTO (native build system, `lld`) inlines C helpers into Swift
+    callers; compiling the C differently without it gained nothing. [hardware](docs/hardware.md)
+14. **Views over C memory cost nothing.** A `~Escapable` view with `RawSpan` fields and `Span` bytes, borrowed from
+    its owner, compiles to the same instructions as raw pointers under `-Ounchecked`. [hardware](docs/hardware.md)
+15. **Test layout and SIMD code on x86.** `OutputRawSpan.append(_:as:)` writes an aligned vector store: fine on Apple
+    silicon, a crash on x86. [traps](docs/traps.md)
+16. **`nonisolated async` hops off the actor** unless it is `nonisolated(nonsending)`; in an executor that made a
+    lost wake-up. [concurrency](docs/concurrency.md)
+17. **Measure where it fails.** Loopback hides the receiving side's cost, and tails (a checkpoint's write hold) show
+    only at saturation. [measuring](docs/measuring.md)
+
 **Above all**
 
-13. **Algorithms and batching beat micro-optimizations.** Group commit, bigger read batches and fuller bcrypt sets
+18. **Algorithms and batching beat micro-optimizations.** Group commit, bigger read batches and fuller bcrypt sets
     moved the numbers most; a gzip that compressed better used four times the CPU for bytes that didn't save a packet.
     [gzip case](docs/case-gzip.md)
 

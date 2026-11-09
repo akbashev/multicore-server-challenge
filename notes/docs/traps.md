@@ -50,3 +50,31 @@ swift-format): 2.6 GB on disk, no tarball stored.
 - `-target-cpu` from `clang -march=native -### -c -x c /dev/null` (Swift has no `native`).
 - `--static-swift-stdlib`, so calls into the runtime are direct rather than through the PLT.
 - `-enforce-exclusivity=unchecked` once the design guarantees exclusivity (actor state touched by its own thread).
+
+## `OutputRawSpan.append(_:as:)` assumes alignment
+
+```swift
+out.append(chunk, as: SIMD32<UInt8>.self)   // initializeMemory(as:): an aligned 32-byte store
+```
+
+The generic `append(_:as:)` initializes the memory *as* the type, so the compiler may use an aligned store. Apple
+silicon tolerates an unaligned vector store; x86 faults on it (`vmovdqa` to an address that isn't 16- or 32-byte
+aligned), so a server that passed every test on a Mac crashed on its first response on an x86 runner. For bytes at
+any offset, use `storeBytes(of:toByteOffset:as:)`, which needs no alignment, through `withUnsafeMutableBytes`. And
+test code that touches SIMD or memory layout on x86 before it ships.
+
+## Docker blocks io_uring
+
+Docker's default seccomp profile refuses `io_uring_setup` (`EPERM`). Run an io_uring server in a container with
+`--security-opt seccomp=unconfined`. Under Rosetta's x86 emulation it is `ENOSYS` either way.
+
+## An empty actor method may not hop at all
+
+```swift
+func ping() {}               // on an actor
+await actor.ping()           // release: inlined, and the hops to the actor and back removed as redundant
+```
+
+The optimizer drops a hop when nothing between it and the next hop needs the actor. A test that sent an empty message
+to wake an executor passed in debug and hung in every release run: no job ever reached the executor. A message meant
+to reach the actor's executor has to touch the actor's state.
