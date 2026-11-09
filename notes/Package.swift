@@ -25,6 +25,9 @@ let package = Package(
         .library(name: "Gzip", targets: ["Gzip"]),
         .library(name: "CRC32", targets: ["CRC32"]),
         .library(name: "CPUFeatures", targets: ["CPUFeatures"]),
+        .library(name: "Bcrypt", targets: ["Bcrypt"]),
+        .library(name: "EventLoop", targets: ["EventLoop"]),
+        .library(name: "IORing", targets: ["IORing"]),
     ],
     traits: [
         .trait(
@@ -54,8 +57,17 @@ let package = Package(
         ]),
         // gzip at ISA-L level 0's speed, in Swift.
         .target(name: "Gzip", dependencies: ["CRC32"]),
+        // bcrypt, several hashes in lockstep, its key schedule written out per lane count (scripts/ generates it).
+        .target(name: "Bcrypt"),
+        // An executor for actors on a thread of its own, sleeping in epoll_wait; actors can wait on sockets in it (Linux).
+        .target(name: "EventLoop", swiftSettings: [.enableExperimentalFeature("Extern")]),
+        // io_uring over its system calls: rings, requests, completions, registered files, provided buffers (Linux).
+        .target(name: "IORing", swiftSettings: [.enableExperimentalFeature("Extern")]),
         .testTarget(name: "SHA256Tests", dependencies: ["SHA256"]),
+        .testTarget(name: "BcryptTests", dependencies: ["Bcrypt"]),
         .testTarget(name: "GzipTests", dependencies: ["Gzip"]),
         .testTarget(name: "CRC32Tests", dependencies: ["CRC32"]),
+        .testTarget(name: "EventLoopTests", dependencies: ["EventLoop"]),
+        .testTarget(name: "IORingTests", dependencies: ["IORing"]),
     ]
 )
