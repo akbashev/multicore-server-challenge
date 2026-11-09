@@ -36,11 +36,19 @@ jobs:
         run: |
           uname -r; lscpu | grep -E 'Model name'
           echo "features: $(grep -o -w -E 'sha_ni|pclmulqdq|avx512f|vpclmulqdq' /proc/cpuinfo | sort -u | xargs)"
+      - name: test (debug)
+        timeout-minutes: 15
+        run: swift test 2>&1 | grep --line-buffered -E 'passed after|failed|✘|error:|Expectation|recorded|runs on|on extensions'
+      - name: test (release)
+        timeout-minutes: 15
+        run: swift test -c release -Xswiftc -enable-testing 2>&1 | grep --line-buffered -E 'passed after|failed|✘|error:|Expectation|recorded|runs on|on extensions'
+      - name: test (portable only)
+        timeout-minutes: 15
+        run: swift test --disable-default-traits 2>&1 | grep --line-buffered -E 'passed after|failed|✘|error:|Expectation|recorded|runs on|on extensions'
       - name: each EventLoop test alone, ten times, debug and release
-        timeout-minutes: 50
+        timeout-minutes: 30
         run: |
-          swift build --build-tests 2>&1 | grep -E 'error|Build' | tail -2
-          swift build -c release -Xswiftc -enable-testing --build-tests 2>&1 | grep -E 'error|Build' | tail -2
+          set +e
           for mode in debug release; do
             flags=(); [ $mode = release ] && flags=(-c release -Xswiftc -enable-testing)
             for name in actorsRunOnTheLoopsThread interruptEndsAWaitBeforeOrDuring waitLastsUntilItsDeadline registeredDescriptorsWakeTheLoop messagesWakeWaitForEvents; do

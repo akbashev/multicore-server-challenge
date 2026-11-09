@@ -158,6 +158,11 @@ public final class EventLoop: SerialExecutor, TaskExecutor {
     public func enqueue(_ job: consuming ExecutorJob) {
         let job = UnownedJob(job)
         jobs.withLock { $0.append(job) }
+        wake()
+    }
+
+    /// Writes the eventfd if the loop sleeps (or is about to), so it looks again at its jobs and its wait's deadline.
+    private func wake() {
         if sleeping.exchange(false, ordering: .sequentiallyConsistent) {
             var one: UInt64 = 1
             _ = sys_write(wakeFD, &one, 8)
@@ -181,8 +186,8 @@ public final class EventLoop: SerialExecutor, TaskExecutor {
 
     /// Suspends the caller until `deadline` passes or `interrupt()` (which may also have come just before), while the
     /// thread runs the loop's other jobs. One wait at a time; it can return early, so callers check what they wait for
-    /// again.
-    public func wait(until deadline: ContinuousClock.Instant? = nil) async {
+    /// again. It runs on the caller's executor (nonsending), the loop's for the actor isolated to it.
+    public nonisolated(nonsending) func wait(until deadline: ContinuousClock.Instant? = nil) async {
         await withUnsafeContinuation { (continuation: UnsafeContinuation<Void, Never>) in
             let now = park.withLock { p -> Bool in
                 if case .woken = p {
@@ -192,7 +197,12 @@ public final class EventLoop: SerialExecutor, TaskExecutor {
                 p = .waiting(continuation, deadline: deadline)
                 return false
             }
-            if now { continuation.resume() }
+            if now {
+                continuation.resume()
+            } else if deadline != nil && isIsolatingCurrentContext() != true {
+                // Parked from another thread: the loop may have gone to sleep without this deadline.
+                wake()
+            }
         }
     }
 
@@ -263,12 +273,14 @@ public final class EventLoop: SerialExecutor, TaskExecutor {
                 if deadline != nil { expire(.now) }
                 continue
             }
-            let deadline = self.deadline
+            // Asleep first, then a look at the jobs and the wait: whoever adds either after that look sees the flag
+            // and writes the eventfd (`wake`).
             sleeping.store(true, ordering: .sequentiallyConsistent)
             if !jobs.withLock({ $0.isEmpty }) {
                 sleeping.store(false, ordering: .relaxed)
                 continue
             }
+            let deadline = self.deadline
             var timeout: Int32 = -1
             if let deadline {
                 let (seconds, attoseconds) = (deadline - .now).components
