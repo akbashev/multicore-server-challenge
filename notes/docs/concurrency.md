@@ -2,24 +2,34 @@
 
 ## An executor of your own
 
-Each actor runs on its own thread through a custom executor:
+Each actor runs on its own thread through a custom executor, the [`EventLoop`](../Sources/EventLoop/EventLoop.swift)
+module:
 
 ```swift
-final class EventLoop: SerialExecutor, TaskExecutor {
-    func enqueue(_ job: consuming ExecutorJob)        // lock a job list, write the eventfd if the loop sleeps
-    func asUnownedSerialExecutor() -> UnownedSerialExecutor { UnownedSerialExecutor(ordinary: self) }
-    // the thread: run queued jobs; with none, sleep in epoll_wait on the eventfd
-}
-
 actor Reactor {
-    nonisolated let loop: EventLoop
+    nonisolated let loop: EventLoop                   // try EventLoop(name: "reactor")
     nonisolated var unownedExecutor: UnownedSerialExecutor { loop.asUnownedSerialExecutor() }
+
+    func run() async throws {
+        try loop.register(listener, for: .readable, token: 0)
+        var events = EventLoop.EventBuffer(capacity: 256)
+        while true {
+            let (count, jobsWaiting) = loop.waitForEvents(&events)   // sockets ready, or a message for this loop
+            for i in 0..<count { handle(events[i]) }
+            if jobsWaiting { await Task.yield() }                    // let the messages run
+        }
+    }
 }
 ```
 
-- A network reactor waits in `epoll_wait` on its own sockets plus the loop's eventfd, so one call covers both
-  readiness and messages from other actors.
-- Write the eventfd only when the loop is asleep (an atomic flag), as NIO's event loop does.
+- `enqueue` appends to a `Mutex`-protected job list and writes the eventfd only when the loop is asleep (an atomic
+  flag), as NIO's event loop does.
+- A reactor waits in `epoll_wait` on its own sockets plus the loop's eventfd, so one call covers both readiness and
+  messages from other actors.
+- With no job to run, the thread sleeps on a second epoll instance that holds only the eventfd: level-triggered
+  sockets stay ready while their actor is busy elsewhere, and waiting on them then would spin.
+- `wait(until:)` and `interrupt()` let the actor wait for a deadline or a wake-up while the thread runs its other
+  jobs.
 
 ## No global executor, no libdispatch
 

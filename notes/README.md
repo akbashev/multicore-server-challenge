@@ -70,9 +70,11 @@ for those workloads and are there as examples, not settings to copy.
 | `CRC32` | CRC-32 as gzip and zlib use it, one-shot or incremental, on PCLMULQDQ or AVX-512 VPCLMULQDQ where the CPU has them (`CRCExtensions`, `CRCExtensions512`) |
 | `SHA256` | SHA-256 and HMAC-SHA256 (pad states precomputed), on SHA-NI where the CPU has it (`SHAExtensions`) |
 | `CPUFeatures` | what the CPU can do, from CPUID through glibc, without reading `/proc` |
+| `Bcrypt` | bcrypt (`$2b$`): one hash, or several in lockstep so their S-box loads overlap; the lane count is calibrated on first use |
+| `EventLoop` | an executor for actors on a thread of its own, sleeping in `epoll_wait`; an actor on it can wait on its sockets in the same call (Linux) |
+| `IORing` | io_uring over its system calls: rings, typed requests, completions, registered files, provided buffers (Linux) |
 
-Coming: bcrypt (single hashes, and several in lockstep), a thin io_uring wrapper and an epoll executor, each with its
-own system call declarations so any one can be copied alone.
+Each module declares the system calls it uses itself (`@_extern(c)`), so any one can be copied out alone.
 
 **Using them.** Swift 6.2 or later (tested with 6.4.2), on Linux x86-64 and arm64, and macOS 27. The `X86Extensions`
 trait (on by default) builds the x86 paths, whose modules use unsafe flags (`-Xcc -msha` and the like); turn it off for

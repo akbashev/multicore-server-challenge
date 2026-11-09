@@ -12,9 +12,9 @@ each is the C function itself, so a call is a direct call:
 
 (`.enableExperimentalFeature("Extern")` on the target.) The same works for:
 
-- **io_uring:** `syscall(2)` with numbers 425, 426 and 427 (the same on x86-64 and arm64). Map the rings with `mmap`,
-  move their heads and tails through `Atomic<UInt32>` over the mapped memory, and write the entries at the kernel's
-  offsets (check them once with a C program). Kernel 6.8 and 7.0 lay out the provided-buffer registration's reserved
+- **io_uring** (the [`IORing`](../Sources/IORing/IORing.swift) module): `syscall(2)` with numbers 425, 426 and 427
+  (the same on x86-64 and arm64). Map the rings with `mmap`, move their heads and tails through `Atomic<UInt32>` over
+  the mapped memory, and write the entries at the kernel's offsets (check them once with a C program). Kernel 6.8 and 7.0 lay out the provided-buffer registration's reserved
   words differently, so test on both.
 - **SQLite's B-tree:** build the unmodified amalgamation with `SQLITE_PRIVATE` defined empty, and its internal
   functions (`sqlite3BtreeCursor`, `sqlite3BtreeIndexMoveto`, `sqlite3VdbeRecordUnpack`, ...) become callable with

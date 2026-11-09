@@ -198,7 +198,8 @@ public struct IORing: ~Copyable {
         registration.storeBytes(of: UInt64(UInt(bitPattern: ring)), toByteOffset: ABI.bufferRegRing, as: UInt64.self)
         registration.storeBytes(of: count, toByteOffset: ABI.bufferRegEntries, as: UInt32.self)
         registration.storeBytes(of: id, toByteOffset: ABI.bufferRegGroup, as: UInt16.self)
-        let register = { sys_syscall(ABI.sysRegister, Int(fd), ABI.registerBufferRing, Int(bitPattern: registration), 1, 0, 0) }
+        let ringFD = fd
+        let register = { sys_syscall(ABI.sysRegister, Int(ringFD), ABI.registerBufferRing, Int(bitPattern: registration), 1, 0, 0) }
         var rc = register()
         if rc < 0 && errno == EINVAL {
             // Ubuntu's 6.8.0-136 and later kernels refuse reserved words that are all zero (Launchpad #2162843, an
