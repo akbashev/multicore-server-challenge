@@ -1,4 +1,5 @@
-# Not for upstream: million's gzip (swift-epoll-akbashev at 68b7dc9, Sources/Gzip) against ISA-L 2.31.1 at level 0 (as
+# Not for upstream: million's gzip (swift-epoll-akbashev at 68b7dc9, Sources/Gzip; and the one-pass version on ISA-L's
+# default table, gzbench/GzipNew.swift) against ISA-L 2.31.1 at level 0 (as
 # swift-iouring-Tabonx calls it), libdeflate level 1 and zlib level 1, on feeds the server sends under the load
 # generator's kind of posts; time per feed on one pinned CPU, sizes, a check that each output decompresses, and perf.
 name: x86 gzip
@@ -65,24 +66,31 @@ jobs:
       - name: ours, with million's flags
         run: |
           export PATH=/opt/swift/usr/bin:$PATH
-          cp -R million/submissions/swift-epoll-akbashev/Sources/Gzip patch/gzbench/swift/Sources/Gzip
           CPU=$(clang -march=native -### -c -x c /dev/null 2>&1 | grep -o '"-target-cpu" "[^"]*"' | cut -d'"' -f4)
           echo "target-cpu $CPU"
-          cd patch/gzbench/swift && swift build -c release -Xswiftc -enforce-exclusivity=unchecked --static-swift-stdlib \
-            -Xswiftc -target-cpu -Xswiftc "$CPU" 2>&1 | tail -1
+          for v in old new; do
+            cp -R patch/gzbench/swift /tmp/sbench-$v
+            mkdir -p /tmp/sbench-$v/Sources/Gzip
+            if [ $v = old ]; then cp million/submissions/swift-epoll-akbashev/Sources/Gzip/Gzip.swift /tmp/sbench-$v/Sources/Gzip/
+            else cp patch/gzbench/GzipNew.swift /tmp/sbench-$v/Sources/Gzip/Gzip.swift; fi
+            (cd /tmp/sbench-$v && swift build -c release -Xswiftc -enforce-exclusivity=unchecked --static-swift-stdlib \
+              -Xswiftc -target-cpu -Xswiftc "$CPU" 2>&1 | tail -1)
+          done
       - name: time per feed (one pinned CPU), sizes, check
         run: |
           mkdir -p /tmp/out
           for round in 1 2; do
             echo "== round $round"
-            taskset -c 1 patch/gzbench/swift/.build/release/sbench /tmp/feeds 300 400 /tmp/out
+            taskset -c 1 /tmp/sbench-old/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-old
+            taskset -c 1 /tmp/sbench-new/.build/release/sbench /tmp/feeds 300 400 /tmp/out swift-new
             taskset -c 1 /tmp/cbench /tmp/feeds 300 400 /tmp/out
           done
           python3 patch/gzbench/verify.py /tmp/feeds /tmp/out 300
-      - name: perf, ours and ISA-L
+      - name: perf, the new one and ISA-L
         run: |
+          set +o pipefail
           demangle() { /opt/swift/usr/bin/swift-demangle --simplified; }
-          perf record -q -F 4999 -o /tmp/s.data -- taskset -c 1 patch/gzbench/swift/.build/release/sbench /tmp/feeds 300 300 /tmp/out > /dev/null 2>&1
-          echo "-- ours"; perf report -i /tmp/s.data --stdio --no-children --sort symbol 2>/dev/null | grep -v '^#' | grep -v '^$' | head -14 | demangle | cut -c1-150
+          perf record -q -F 4999 -o /tmp/s.data -- taskset -c 1 /tmp/sbench-new/.build/release/sbench /tmp/feeds 300 300 /tmp/out swift-new > /dev/null 2>&1
+          echo "-- the new one"; perf report -i /tmp/s.data --stdio --no-children --sort symbol 2>/dev/null | grep -v '^#' | grep -v '^$' | head -14 | demangle | cut -c1-150
           perf record -q -F 4999 -o /tmp/c.data -- taskset -c 1 /tmp/cbench /tmp/feeds 300 300 /tmp/out > /dev/null 2>&1
           echo "-- cbench (all three)"; perf report -i /tmp/c.data --stdio --no-children --sort symbol 2>/dev/null | grep -v '^#' | grep -v '^$' | head -20 | cut -c1-150
