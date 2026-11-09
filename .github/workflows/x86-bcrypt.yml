@@ -1,7 +1,5 @@
-# Not for upstream: swift-epoll-akbashev-sha (SHA-256 on the x86 SHA extensions) on an x86 runner: whether the CPU
-# has them and the server picks them (its start-up check hashes test messages both ways), and the conformance tests
-# on the 2% seed with them in use.
-name: x86 sha
+# Not for upstream: the swift-notes package (notes/) tested on x86 runners, with its X86Extensions trait and without.
+name: x86 notes
 on:
   workflow_dispatch:
 permissions:
@@ -9,36 +7,35 @@ permissions:
 defaults:
   run:
     shell: bash
+    working-directory: notes
 
 jobs:
-  sha:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2]
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    services:
-      postgres:
-        image: postgres:18
-        env: { POSTGRES_PASSWORD: postgres }
-        ports: ["5432:5432"]
-        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
-    env: { PGHOST: 127.0.0.1, PGPORT: 5432, PGUSER: postgres, PGPASSWORD: postgres }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version-file: bench/go.mod, cache-dependency-path: bench/go.sum }
-      - name: machine
+      - name: Swift 6.4.2
         run: |
-          lscpu | grep -E "Model name|^CPU\(s\)"
-          echo "SHA extensions: $(grep -o -m1 -w sha_ni /proc/cpuinfo || echo none)"
-      - name: tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client curl jq
-      - name: seed
-        run: bash seed/make-seed.sh --dev
-      - name: install.sh
-        run: sudo bash submissions/swift-epoll-akbashev-sha/install.sh > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; exit 1; }
-      - name: build, start, test
-        run: bash test/run.sh submissions/swift-epoll-akbashev-sha
-      - name: start-up line
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils git libc6-dev libcurl4-openssl-dev libedit2 libgcc-13-dev libncurses-dev \
+            libsqlite3-0 libstdc++-13-dev libxml2-dev libz3-dev pkg-config tzdata unzip zlib1g-dev
+          sudo mkdir -p /opt/swift
+          curl -fsSL https://download.swift.org/swift-6.4.2-release/ubuntu2404/swift-6.4.2-RELEASE/swift-6.4.2-RELEASE-ubuntu24.04.tar.gz \
+            | sudo tar -C /opt/swift -xz --strip-components=1 --exclude='usr/bin/lldb*' --exclude='usr/lib/liblldb*' \
+              --exclude='usr/bin/sourcekit-lsp' --exclude='usr/lib/libsourcekitdInProc.so' --exclude='usr/bin/docc'
+          echo /opt/swift/usr/bin >> "$GITHUB_PATH"
+      - name: the CPU
         run: |
-          DATABASE_URL=postgres://conduit:conduit@127.0.0.1:5432/conduit_dev JWT_SECRET=x PORT=3999 timeout 10 \
-            submissions/swift-epoll-akbashev-sha/.build/release/Conduit 2>&1 | grep listening || true
-          objdump -d submissions/swift-epoll-akbashev-sha/.build/release/Conduit | grep -c sha256rnds2
+          lscpu | grep -E 'Model name'
+          echo "features: $(grep -o -w -E 'sha_ni|pclmulqdq|avx512f|vpclmulqdq' /proc/cpuinfo | sort -u | xargs)"
+      - name: test (debug)
+        run: swift test 2>&1 | grep -E '✘|passed after|failed|error|runs on|on extensions' | tail -24
+      - name: test (release), and which paths ran
+        run: |
+          swift test -c release -Xswiftc -enable-testing 2>&1 | grep -E '✘|passed after|failed|error|runs on|on extensions' | tail -24
+      - name: test (portable only)
+        run: swift test --disable-default-traits 2>&1 | grep -E '✘|passed after|failed|error|runs on|on extensions' | tail -24
