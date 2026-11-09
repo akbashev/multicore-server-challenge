@@ -36,23 +36,19 @@ jobs:
         run: |
           uname -r; lscpu | grep -E 'Model name'
           echo "features: $(grep -o -w -E 'sha_ni|pclmulqdq|avx512f|vpclmulqdq' /proc/cpuinfo | sort -u | xargs)"
-      - name: test (debug), one target at a time
-        timeout-minutes: 40
+      - name: each EventLoop test alone, ten times, debug and release
+        timeout-minutes: 50
         run: |
-          swift build --build-tests 2>&1 | grep -E 'error|Compiling|Build' | tail -3
-          for t in SHA256Tests CRC32Tests GzipTests BcryptTests EventLoopTests IORingTests; do
-            echo "== $t"
-            timeout 300 swift test --skip-build --filter "$t" 2>&1 \
-              | grep --line-buffered -E 'started|passed|failed|✘|error:|Expectation|runs on|on extensions|recorded' \
-              || echo "!! $t ended with ${PIPESTATUS[0]} (124: killed after 300 s)"
-          done
-      - name: test (release), one target at a time
-        timeout-minutes: 40
-        run: |
-          swift build -c release -Xswiftc -enable-testing --build-tests 2>&1 | grep -E 'error|Build' | tail -3
-          for t in EventLoopTests IORingTests SHA256Tests CRC32Tests; do
-            echo "== $t"
-            timeout 300 swift test -c release -Xswiftc -enable-testing --skip-build --filter "$t" 2>&1 \
-              | grep --line-buffered -E 'started|passed|failed|✘|error:|Expectation|runs on|on extensions|recorded' \
-              || echo "!! $t ended with ${PIPESTATUS[0]} (124: killed after 300 s)"
+          swift build --build-tests 2>&1 | grep -E 'error|Build' | tail -2
+          swift build -c release -Xswiftc -enable-testing --build-tests 2>&1 | grep -E 'error|Build' | tail -2
+          for mode in debug release; do
+            flags=(); [ $mode = release ] && flags=(-c release -Xswiftc -enable-testing)
+            for name in actorsRunOnTheLoopsThread interruptEndsAWaitBeforeOrDuring waitLastsUntilItsDeadline registeredDescriptorsWakeTheLoop messagesWakeWaitForEvents; do
+              ok=0; hung=0; other=0
+              for i in $(seq 10); do
+                timeout 30 swift test "${flags[@]}" --skip-build --filter "EventLoopTests.$name" > /tmp/out.txt 2>&1
+                case $? in 0) ok=$((ok + 1)) ;; 124) hung=$((hung + 1)) ;; *) other=$((other + 1)); tail -5 /tmp/out.txt ;; esac
+              done
+              echo "RESULT $mode $name: $ok passed, $hung hung, $other failed"
+            done
           done
